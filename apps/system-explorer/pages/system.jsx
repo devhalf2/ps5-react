@@ -5,7 +5,7 @@ import {useState} from 'react';
 import {View, Text, Notifications, Linking, BackHandler} from '@ps5-react/core';
 import {Panel, Button, Status, attempt, body} from '../ui.jsx';
 
-const REPO = 'https://github.com/half144/ps5-react';
+const REPO = 'https://github.com/overdriveps5/ps5-react';
 
 const ACTIONS = [
   ['Send notification', () => Notifications.show('Hello from System Explorer', 'Sent with PS5 React')

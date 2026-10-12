@@ -52,11 +52,11 @@ int main(void) {
   char prefixed[600]; snprintf(prefixed, sizeof prefixed, "x%s", url);
   assert(!browser_match(&match, (const unsigned char *)prefixed, strlen(prefixed) + 1));
   // The selected public page uses punctuation that the catalog's synthetic name loses.
-  match.filename = "G_02225(v02.024)-[DLPSGAME.COM].rar";
+  match.filename = "G_02225(v02.024)-[EXAMPLE.ORG].rar";
   const char *real_name_routes[] = {
-    "https://vikingfile.com/d/Ab01234567/G_02225(v02.024)-[DLPSGAME.COM].rar",
-    "https://vikingfile.com/d/Ab01234567/G_02225%28v02.024%29-%5BDLPSGAME.COM%5D.rar",
-    "https://vik1ngfile.site/d/Ab01234567/G_02225%28v02.024%29-%5BDLPSGAME.COM%5D.rar"
+    "https://vikingfile.com/d/Ab01234567/G_02225(v02.024)-[EXAMPLE.ORG].rar",
+    "https://vikingfile.com/d/Ab01234567/G_02225%28v02.024%29-%5BEXAMPLE.ORG%5D.rar",
+    "https://vik1ngfile.site/d/Ab01234567/G_02225%28v02.024%29-%5BEXAMPLE.ORG%5D.rar"
   };
   for (size_t route = 0; route < 3; route++) {
     for (size_t step = 1; step <= 2; step++) {
