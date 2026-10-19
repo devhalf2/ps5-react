@@ -29,6 +29,15 @@ const EASE_MS = 240;
 // that only flies past is never fetched; what the view stops on (with the rows the list mounts ahead)
 // starts then. Cached art still draws during the scroll.
 const IMAGE_DEFER_MS = 150;
+// A focus scroll farther than this many viewports (Circle back to the top of a long catalog) would pass
+// every row on the way, at a catch-up speed that mounts and rasterizes screens of content per frame. It
+// jumps to one viewport short of the target instead, and only that last viewport moves.
+const FAR_VIEWPORTS = 2;
+
+/** Where a scroll from `from` to `to` starts moving: `from`, or one `viewport` short of a far `to`. */
+function startOf(from, to, viewport) {
+  return Math.abs(to - from) > FAR_VIEWPORTS * viewport ? Math.round(to + Math.sign(from - to) * viewport) : from;
+}
 
 function assignRef(ref, value) {
   if (typeof ref === 'function') ref(value);
@@ -50,7 +59,7 @@ export function createFrame(parent) {
     reveal(rect, anchor) {
       const {viewport, handle} = frame;
       if (!viewport || handle == null) return;
-      const [fromX, fromY, maxX, maxY] = NativeUI.scrollTo(handle, NaN, NaN);
+      let [fromX, fromY, maxX, maxY] = NativeUI.scrollTo(handle, NaN, NaN);
       // Logical px to screen px, like the layout rectangles.
       const scale = screen.width / 1280;
       const insets = frame.props.revealInsets;
@@ -78,6 +87,11 @@ export function createFrame(parent) {
           [top, bottom], insets?.bottom != null ? bottom : 0);
       } else y = revealOffset(frame.y, rect.y - viewport.y, rect.height, viewport.height, maxY, [top, bottom]);
       if (x === frame.x && y === frame.y) return;
+      const [startX, startY] = [startOf(fromX, x, viewport.width), startOf(fromY, y, viewport.height)];
+      if (startX !== fromX || startY !== fromY) {
+        frame.stop();
+        [fromX, fromY] = NativeUI.scrollTo(handle, startX, startY);
+      }
       frame.x = x;
       frame.y = y;
       frame.animate(fromX, fromY, x, y);
@@ -133,17 +147,24 @@ export function createFrame(parent) {
       });
     },
     /**
-     * The content moved up by `dy` (a VirtualList dropping rows above the viewport, or down for a
-     * negative `dy`): scrolls by the same amount so nothing moves on screen, mid-animation included.
+     * The content from offset `top` down moved up by `dy` (a VirtualList dropping rows above the
+     * viewport, or down for a negative `dy`): an offset there scrolls by the same amount so nothing
+     * moves on screen, mid-animation included. An offset above `top`, on content that stayed (a
+     * header above the list), stays too: else a scroll to the top would be carried back into the list.
      */
-    shift(dy) {
+    shift(dy, top = -Infinity) {
+      const moved = offset => (offset >= top ? offset - dy : offset);
       const [, atY] = NativeUI.scrollTo(frame.handle, NaN, NaN);
-      NativeUI.scrollTo(frame.handle, NaN, atY - dy);
-      frame.y -= dy;
+      const here = atY >= top;
+      if (here) NativeUI.scrollTo(frame.handle, NaN, atY - dy);
+      frame.y = moved(frame.y);
       if (frame.timer === null) return;
-      frame.position[1] -= dy;
-      frame.target[1] -= dy;
-      frame.ease.from[1] -= dy;
+      // The view and the start of its ease move as the engine's offset did; the target on its own.
+      if (here) {
+        frame.position[1] -= dy;
+        frame.ease.from[1] -= dy;
+      }
+      frame.target[1] = moved(frame.target[1]);
     },
     /** Whether this view or one around it is focus scrolling. @returns {boolean} */
     scrolling() {

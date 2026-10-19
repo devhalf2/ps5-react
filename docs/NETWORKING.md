@@ -190,12 +190,19 @@ second of writes to the open file before detection; it never redirects those
 writes to another storage root. Apps still need to check free space and actual
 mounted external roots before submission. Write failures preserve partial data.
 
-Snapshots contain `state`, `received`, `written`, `total` (bytes or `null`),
+Snapshots contain `state`, `received`, `written`, `completedBytes`, `total` (bytes or `null`),
 `bytesPerSecond`, `connections`, `retries`, `bufferedBytes`, `status`, `id`,
 `destination` and `error`. States are `queued`, `connecting`, `downloading`,
 `verifying`, `completed`, `failed`, and `cancelled`. Progress is sampled and
 polled every 250 ms; retrying a range can reduce progress. `written` is completed
 ranges plus bytes written in current ranges, not bytes already checkpointed.
+`completedBytes` counts only whole completed ranges, the bytes a checkpoint keeps:
+it never goes down within a task, and a resumed task's first `downloading`
+snapshot already holds what the paused one had, so a progress bar that follows it
+does not step back across pause and resume (the cut ranges download again behind
+it). Without range support nothing resumes and it follows `written`. While a
+resumed task is still `connecting`, before its checkpoint is read, it is 0; keep
+the last value shown until the task reaches `downloading`.
 `connections` includes ranges draining to disk, rather than an exact socket count.
 
 ## Bounded HTTP requests

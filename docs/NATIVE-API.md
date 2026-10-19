@@ -139,6 +139,8 @@ headers include `etag` and `last-modified` for stable file identity checks.
 `Downloads.enqueue({url, destination, ...options})` returns a cancellable task
 with progress subscriptions and a completion promise. Binary downloads stay
 native, use parallel validated ranges when eligible, and resume durable ranges.
+Progress snapshots carry `written`, the live disk count, and `completedBytes`,
+the bytes of whole ranges a resume keeps; show resumable progress from the latter.
 `Downloads.enqueueManifest({manifest, destination, ...options})` supports split
 byte manifests with per-piece SHA-1 and whole-file SHA-256 verification.
 `DownloadFormats` validates manifests and routes image, package, archive and

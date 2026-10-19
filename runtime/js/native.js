@@ -289,7 +289,7 @@ function pollNetwork() {
 function networkTask(id, call, destination = '', backend = 'network') {
   const key = `${backend}:${id}`;
   const task = {id, backend, call, destination, listeners: new Set(),
-    snapshot: Object.freeze({id, destination, state: 'queued', received: 0, written: 0, total: null,
+    snapshot: Object.freeze({id, destination, state: 'queued', received: 0, written: 0, completedBytes: 0, total: null,
       bytesPerSecond: 0, connections: 0, retries: 0, bufferedBytes: 0})};
   const done = new Promise((resolve, reject) => { task.resolve = resolve; task.reject = reject; });
   // A task can be observed through subscriptions without awaiting its completion.

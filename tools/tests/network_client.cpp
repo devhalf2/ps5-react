@@ -71,6 +71,10 @@ int main(int argc, char** argv) {
   const auto started = std::chrono::steady_clock::now();
   std::uint64_t peak_buffer = 0;
   unsigned peak_connections = 0;
+  // Resume progress: what the first "downloading" snapshot holds, and how often whole-range bytes went down.
+  std::int64_t first_completed = -1;
+  std::uint64_t last_completed = 0;
+  unsigned completed_drops = 0;
   for (;;) {
     const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-started).count();
     if (stop_ms && elapsed >= stop_ms) {
@@ -82,9 +86,16 @@ int main(int argc, char** argv) {
     for (const auto& result : network::poll()) {
       peak_buffer = std::max(peak_buffer, result.buffered);
       peak_connections = std::max(peak_connections, result.connections);
+      if (result.state == "downloading" && first_completed < 0) first_completed = static_cast<std::int64_t>(result.completed_bytes);
+      if (result.state != "queued" && result.state != "connecting") {
+        if (result.completed_bytes < last_completed) ++completed_drops;
+        last_completed = result.completed_bytes;
+      }
       if (result.state == "completed" || result.state == "failed" || result.state == "cancelled") {
         std::cout << "{\"state\":" << escaped(result.state) << ",\"error\":" << escaped(result.error)
           << ",\"body\":" << escaped(result.body) << ",\"written\":" << result.written
+          << ",\"completedBytes\":" << result.completed_bytes << ",\"firstCompleted\":" << first_completed
+          << ",\"completedDrops\":" << completed_drops
           << ",\"url\":" << escaped(result.url) << ",\"headers\":{";
         bool first = true;
         for (const auto& [name, value] : result.headers) {

@@ -142,3 +142,67 @@ test('scrolling() is true from a reveal until the view rests, in the view and th
   assert.equal(frame.scrolling(), false);
   assert.deepEqual(seen, [true, false], 'listeners hear the start and the stop');
 });
+
+test('a focus scroll farther than two viewports jumps to one viewport short of the target, then moves the rest', () => {
+  for (const motion of ['steady', 'ease-out']) {
+    const {engine, frame, targets, settle} = setup(20000);
+    frame.props = {...frame.props, scrollMotion: motion};
+    engine.y = 12000;
+    frame.onScroll({scrollX: 0, scrollY: 12000});
+    frame.reveal({x: 0, y: 0, width: 100, height: 100}, null);
+    assert.equal(engine.y, 720, `${motion}: one viewport below the top before any frame`);
+    assert.deepEqual(targets, [{x: 0, y: 0}]);
+    const offsets = [];
+    for (let i = 0; i < 200 && frame.timer !== null; i++) {
+      globalThis.__ps5ReactFrame(1000 / 60);
+      offsets.push(engine.y);
+    }
+    assert.equal(engine.y, 0, motion);
+    assert.ok(offsets.every((y, i) => y < (offsets[i - 1] ?? 720)), `${motion}: only up from there: ${offsets.join()}`);
+    assert.ok(offsets.length <= 30, `${motion}: a viewport's worth of frames, not 12000 px of them`);
+    // Down, the jump lands a viewport above the target.
+    frame.reveal({x: 0, y: 9000, width: 100, height: 100}, null);
+    assert.equal(engine.y, 8412 - 720, motion);
+    settle();
+    assert.equal(engine.y, 8412, motion);
+  }
+});
+
+test('a focus scroll within two viewports moves all the way, and so does one interrupting a scroll', () => {
+  const {engine, frame, settle} = setup(20000);
+  frame.reveal({x: 0, y: 1400, width: 100, height: 100}, null);
+  globalThis.__ps5ReactFrame(1000 / 60);
+  assert.ok(engine.y > 0 && engine.y < 100, 'no jump for 812 px');
+  frame.reveal({x: 0, y: 2000, width: 100, height: 100}, null);
+  globalThis.__ps5ReactFrame(1000 / 60);
+  assert.ok(engine.y < 200, 'a new near target carries on from where the view is');
+  settle();
+  assert.equal(engine.y, 1412);
+});
+
+test('a shift moves only the offsets on the content that moved: a scroll to a header above a list stays on it', () => {
+  const {engine, frame, settle} = setup(20000);
+  engine.y = 12000;
+  frame.onScroll({scrollX: 0, scrollY: 12000});
+  frame.reveal({x: 0, y: 0, width: 100, height: 100}, null);
+  globalThis.__ps5ReactFrame(1000 / 60);
+  const view = engine.y;
+  assert.ok(view > 0 && view < 720, view);
+  // A VirtualList below a 1000 px header re-centres its rows 6000 px lower while the view is above it.
+  frame.shift(-6000, 1000);
+  assert.equal(engine.y, view, 'the view above the list stays');
+  assert.equal(frame.target[1], 0, 'and so does the target, on the header');
+  assert.equal(frame.y, 0);
+  settle();
+  assert.equal(engine.y, 0, 'the scroll reaches the top');
+  // With the view inside the list, the view and its target move with the rows.
+  frame.reveal({x: 0, y: 5000, width: 100, height: 100}, null);
+  globalThis.__ps5ReactFrame(1000 / 60);
+  const inside = engine.y;
+  frame.shift(-600, 1000);
+  assert.equal(engine.y, inside + 600);
+  assert.equal(frame.target[1], 4412 + 600);
+  settle();
+  assert.equal(engine.y, 5012);
+  assert.equal(frame.y, 5012);
+});

@@ -30,6 +30,8 @@ struct Snapshot {
   std::string url;
   std::vector<std::pair<std::string, std::string>> headers;
   std::uint64_t received = 0, written = 0, total = 0, buffered = 0;
+  // Bytes of whole ranges, the ones a checkpoint keeps: never less after a pause, a resume or a retry.
+  std::uint64_t completed_bytes = 0;
   double bytes_per_second = 0;
   unsigned connections = 0, retries = 0;
   int status = 0;

@@ -554,6 +554,11 @@ def main():
         resumed = run("/slow", path)
         assert resumed["state"] == "completed", resumed
         assert path.read_bytes() == DATA
+        # Progress survives the pause: the resumed task starts from the bytes the checkpoint kept and
+        # never shows fewer, though the cut ranges' bytes are downloaded again.
+        assert 0 < cancelled["completedBytes"] <= cancelled["written"], cancelled
+        assert resumed["firstCompleted"] == cancelled["completedBytes"], (cancelled, resumed)
+        assert resumed["completedDrops"] == 0 and resumed["completedBytes"] == len(DATA), resumed
         requests = Handler.requests[before:]
         assert len([item for item in requests if item[1] != "bytes=0-0"]) < 16, requests
         assert all(item[2] == '"fixture-v1"' for item in requests if item[1] != "bytes=0-0")

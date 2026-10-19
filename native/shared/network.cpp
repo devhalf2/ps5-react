@@ -82,7 +82,8 @@ struct Job {
   // Mirrors whose size and ETag matched the primary; one that fails a range is emptied.
   std::vector<std::string> mirrors;
   std::vector<Segment> segments;
-  std::uint64_t total = 0, committed = 0;
+  // committed: bytes of finished requests, split parts included; durable: bytes of completed ranges only.
+  std::uint64_t total = 0, committed = 0, durable = 0;
   unsigned retries = 0, splits = 0;
   bool ranged = false, known = false, checkpoint_ready = false, recovering = false;
   void fail(const std::string& reason) {
@@ -92,6 +93,10 @@ struct Job {
     platform_log(("download failed: " + reason).c_str());
   }
 };
+
+std::uint64_t range_length(const Job& job, std::size_t i) {
+  return job.sources.empty() ? std::min(job.request.range_bytes, job.total-i*job.request.range_bytes) : job.segments[i].length;
+}
 
 const char* terminal_state(const Job& job) {
   if (job.failed) return "failed";
@@ -1199,10 +1204,11 @@ bool Service::prepare(Job& job) {
     if (!valid) { job.fail("partial file has no matching durable checkpoint; remove .part/.resume or choose another destination"); return false; }
     for (std::size_t i = 0; i < job.completed.size(); ++i) if (job.completed[i]) {
       const auto begin = job.sources.empty() ? i*job.request.range_bytes : job.segments[i].begin;
-      const auto end = job.sources.empty() ? std::min(job.total, (i+1)*job.request.range_bytes) : begin+job.segments[i].length;
+      const auto end = begin+range_length(job, i);
       if (end > static_cast<std::uint64_t>(existing.st_size)) { job.fail("partial file is shorter than its checkpoint"); return false; }
       job.committed += end-begin;
     }
+    job.durable = job.committed;
     if (job.committed && job.etag.empty() && job.sources.empty() && !check_sample(job)) return false;
   }
   if (job.fd < 0) { job.fail(system_error("open partial file (parent must exist; existing partial files require a valid checkpoint)")); return false; }
@@ -1351,6 +1357,8 @@ void Service::snapshot(Job& job, unsigned allowed, Clock::time_point now,
   {
     std::lock_guard lock(job.mutex);
     job.snapshot.received = received; job.snapshot.written = written;
+    // Without ranges nothing resumes, and a retry starts over: the live count is all there is.
+    job.snapshot.completed_bytes = job.ranged ? job.durable : written;
     job.snapshot.total = job.total; job.snapshot.total_known = job.known;
     job.snapshot.bytes_per_second = speed; job.snapshot.buffered = buffered;
     job.snapshot.connections = std::min(active, allowed); job.snapshot.retries = job.retries;
@@ -1389,7 +1397,13 @@ void Service::run_job(const std::shared_ptr<Job>& job) {
   const bool prepared = !file || prepare(*job);
   for (Transfer& t : transfers_) t.probe = false;
   if (prepared && !job->cancelled && !job->recovering) {
-    { std::lock_guard lock(job->mutex); job->snapshot.state = "downloading"; }
+    {
+      // A resumed download shows its checkpointed bytes from its first "downloading" snapshot, not 0.
+      std::lock_guard lock(job->mutex);
+      job->snapshot.state = "downloading";
+      job->snapshot.written = job->snapshot.received = job->snapshot.completed_bytes = job->committed;
+      job->snapshot.total = job->total; job->snapshot.total_known = job->known;
+    }
     const unsigned limit = job->ranged ? job->request.connections : 1;
     const unsigned initial = job->request.adaptive ? std::min(8u, limit) : limit;
     std::vector<Window> windows;
@@ -1448,7 +1462,7 @@ void Service::run_job(const std::shared_ptr<Job>& job) {
             job->committed += t.written;
             if (!t.cut) ++windows[t.window].idle;
             if (!--open[t.piece]) {
-              if (job->ranged) job->completed[t.piece] = 1;
+              if (job->ranged) { job->completed[t.piece] = 1; job->durable += range_length(*job, t.piece); }
               ++finished;
             }
           } else if (cut_by_suspension(t, now, grace_until)) {
@@ -1605,7 +1619,7 @@ void Service::run_job(const std::shared_ptr<Job>& job) {
   }
   if (prepared && job->recovering) {
     std::lock_guard lock(job->mutex);
-    job->snapshot.written = job->snapshot.received = job->total;
+    job->snapshot.written = job->snapshot.received = job->snapshot.completed_bytes = job->total;
     job->snapshot.total = job->total; job->snapshot.total_known = true;
   }
   if (file && job->fd >= 0) {

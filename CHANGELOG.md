@@ -18,6 +18,19 @@
   signature `\x7FCNT`, read once every file is written and again on recovery. A file so named that is
   something else is no longer offered for install.
 
+## Unreleased — resumable download progress, far focus scrolls
+
+- Download snapshots carry `completedBytes`: the bytes of whole completed ranges, the ones a checkpoint
+  keeps. It never goes down within a task, and a resumed task's first `downloading` snapshot already
+  holds what the paused one had, so a progress bar that follows it no longer steps back after a pause.
+  `written` still counts the live ranges and drops by their bytes when they are cut or retried. A resumed
+  task also no longer reports 0 written for its first 250 ms of `downloading`.
+- A focus scroll farther than two viewports (Circle back to the top of a long catalog) jumps to one
+  viewport short of its target and moves only that last viewport; it used to pass every row on the way
+  at a catch-up speed that mounted and drew screens of content per frame, and stalled.
+- A `VirtualList` re-centring its rows moves only the scroll offsets on the list: a scroll toward a
+  header above the list (the top of the page) used to be carried back into the list and stop there.
+
 ## Unreleased — full-screen fades through the fade cache
 
 - The PS5 and desktop builds turn on the engine's fade cache (one 1920x1080 slot, 8.3 MB of .bss):
