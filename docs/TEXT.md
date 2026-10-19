@@ -46,6 +46,28 @@ export default {
 
 A codepoint the baked font lacks draws as `?`, unless a runtime font has it.
 
+### Coverage gamma
+
+The engine blends a glyph's antialiased edge pixels in sRGB, so text reads a
+little lighter than on a renderer that blends in linear light, such as the PS5's
+own UI: SST section titles measured 2.8 px stems against the console's 3.17 at
+the same font, weight and size. A font's `gamma` lifts each baked pixel's
+coverage to `cov^(1/gamma)` before packing, at no runtime cost. Empty and full
+pixels keep their values, so shapes keep their size and only the edges darken.
+
+```js
+export default {
+  fonts: {'SST-Medium': {glyphs: 'european', gamma: 1.8}},
+};
+```
+
+- The default is 1 (no change). Accepted values are 0.5 to 4.
+- 1.8 brings light text on dark grounds close to the console's weight. A
+  stronger value can close counters at small sizes.
+- Dark text on a light ground gets heavier too, while linear-light blending
+  makes it lighter. Keep that in mind for apps with mostly dark-on-light text.
+- Runtime fonts (`textFonts`) are drawn as before.
+
 ## Runtime fonts
 
 List the scripts an app shows in `app.json`:
@@ -121,6 +143,9 @@ Text containing Arabic or Hebrew letters is ordered by the Unicode
 bidirectional algorithm (SheenBidi), one paragraph per line feed: numbers and
 Latin names inside Arabic stay left to right (`PS5 تحميل 24.2 GB`), brackets
 are mirrored, and lines break in logical order before each line is reordered.
+Bidi marks and isolates (U+200E, U+200F, U+202A–U+202E, U+2066–U+2069) take
+effect and draw nothing, in any text: wrap a measurement in LRI…PDI
+(`\u2066 24.2 GB \u2069`) to keep it left to right inside a translated sentence.
 
 | Style | On | Values | Effect |
 | --- | --- | --- | --- |

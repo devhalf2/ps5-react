@@ -268,6 +268,33 @@ test('scrolled frames shift rectangles and are revealed innermost first', () => 
   assert.deepEqual(revealed, [['inner', 400], ['outer', 100]]);
 });
 
+test('a node focused before its first layout is revealed on it, if it still has focus', () => {
+  const t = setup();
+  const revealed = [];
+  const frame = {parent: null, x: 0, y: 0, reveal: rect => revealed.push(rect.y)};
+  const first = t.focus.createNode(t.focus.root, frame, {focusKey: 'first'});
+  const second = t.focus.createNode(t.focus.root, frame, {focusKey: 'second'});
+  t.focus.register(first);
+  t.focus.register(second);
+  t.focus.focus(first);
+  t.flush();
+  assert.deepEqual(revealed, []);
+  t.focus.setRect(first, {x: 0, y: 900, width: 100, height: 100});
+  t.flush();
+  assert.deepEqual(revealed, [900]);
+  // Only the first layout reveals; later ones leave scrolling to focus moves.
+  t.focus.setRect(first, {x: 0, y: 950, width: 100, height: 100});
+  t.flush();
+  assert.deepEqual(revealed, [900]);
+  // Focus moved on before the reveal ran: nothing scrolls to the old node.
+  t.focus.focus(second);
+  revealed.length = 0;
+  t.focus.setRect(second, {x: 0, y: 1200, width: 100, height: 100});
+  t.focus.focus(first);
+  t.flush();
+  assert.deepEqual(revealed, [950]);
+});
+
 test('an inert scope is out of navigation; a move with nothing visible stays put', () => {
   const t = setup();
   const browse = t.scope(t.focus.root, {inert: true});

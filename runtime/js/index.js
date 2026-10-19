@@ -9,7 +9,7 @@ export {AppRegistry, Animated, useAnimatedValue, Easing, LayoutAnimation, Svg, P
   from 'embedded-react';
 export const Text = inspectableText(EngineText);
 export {View, Image, Pressable, ScrollView, VirtualList, FocusScope, useFocusable, useFocus, useIsFocused,
-  useNavigationEvents} from './focus/index.js';
+  useIsScrolling, useNavigationEvents} from './focus/index.js';
 export {motion, AnimatePresence, transitions} from './motion/index.js';
 export {DownloadFormats} from './download-formats.js';
 export {Platform, DeviceInfo, FileSystem, Notifications, Users, Controller, useGamepad, Linking, Power, Fonts, BackHandler,

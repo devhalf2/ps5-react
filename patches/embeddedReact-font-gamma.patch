@@ -1,0 +1,161 @@
+Embedded React: a per-font coverage gamma for baked fonts.
+
+Modified from Embedded React (Apache-2.0, Copyright 2026 Cory Lamming) at the
+revision pinned in dependencies.lock.json, after the patches listed before this
+one there. Changed files: bridges/quickjs/js/assets/bake-font.mjs,
+bridges/quickjs/js/assets/font-config.mjs and
+bridges/quickjs/js/assets/__tests__/assets.unit.test.js. Not yet proposed
+upstream.
+
+The engine blends glyph coverage in sRGB, so antialiased stems read lighter
+than on a renderer that blends in linear light: SST titles measured about half
+a weight under the PS5's own UI at the same font, weight and size. A font's
+`gamma` in assets.config.js (default 1, unchanged) lifts each baked pixel's
+coverage to 255 * (cov / 255)^(1 / gamma) before packing, at no runtime cost.
+Empty and full pixels keep their values; gamma must be 0.5 to 4.
+
+diff --git a/bridges/quickjs/js/assets/__tests__/assets.unit.test.js b/bridges/quickjs/js/assets/__tests__/assets.unit.test.js
+index 205451c..9beeda9 100644
+--- a/bridges/quickjs/js/assets/__tests__/assets.unit.test.js
++++ b/bridges/quickjs/js/assets/__tests__/assets.unit.test.js
+@@ -26,6 +26,7 @@ import {fileURLToPath} from 'node:url';
+ import {rasterize} from '../rasterize.mjs';
+ import {bakeImage} from '../bake-image.mjs';
+ import {
++  applyCoverageGamma,
+   bakeFont,
+   resolveExtras,
+   ASCII_FIRST,
+@@ -242,6 +243,22 @@ describe('bakeFont', () => {
+     expect(f.sizes[0].extras.map(e => e.codepoint)).toEqual([0x00b0]);
+   });
+ 
++  it('lifts partial coverage by the font gamma and leaves empty and full pixels', () => {
++    const plain = bakeFont({path: INTER, family: 'Inter', sizes: [20], bpp: 8});
++    const lifted = bakeFont({path: INTER, family: 'Inter', sizes: [20], bpp: 8, gamma: 2});
++    const a = plain.sizes[0].bitmap;
++    const b = lifted.sizes[0].bitmap;
++    expect(b).toHaveLength(a.length);
++    for (let i = 0; i < a.length; i++) {
++      expect(b[i]).toBe(Math.round(255 * Math.sqrt(a[i] / 255)));
++    }
++    expect(applyCoverageGamma([0, 64, 255], 2)).toEqual([0, 128, 255]);
++    expect(applyCoverageGamma([0, 64, 255], 1)).toEqual([0, 64, 255]);
++    expect(() =>
++      bakeFont({path: INTER, family: 'Inter', sizes: [16], gamma: 0}),
++    ).toThrow(/gamma/);
++  });
++
+   it('rejects an unsupported bpp', () => {
+     expect(() =>
+       bakeFont({path: INTER, family: 'Inter', sizes: [16], bpp: 3}),
+diff --git a/bridges/quickjs/js/assets/bake-font.mjs b/bridges/quickjs/js/assets/bake-font.mjs
+index 23eed6c..96a2831 100644
+--- a/bridges/quickjs/js/assets/bake-font.mjs
++++ b/bridges/quickjs/js/assets/bake-font.mjs
+@@ -24,6 +24,9 @@
+ //   bpp 2 → 4 px/byte, value = round(cov*3/255)   (decoded as value*85)
+ //   bpp 4 → 2 px/byte, high nibble = left, value = round(cov*15/255)   (decoded as value*17)
+ //   bpp 8 → 1 byte/px, raw coverage
++// A font's `gamma` (default 1, none) first lifts the coverage to cov^(1/gamma): the engine blends it in
++// sRGB, so antialiased edges read thinner than on a renderer that blends in linear light (the PS5's
++// own UI). A gamma near 2 gives light text on dark grounds about that weight back.
+ import fs from 'node:fs';
+ import opentype from 'opentype.js';
+ import {rasterize} from './rasterize.mjs';
+@@ -228,12 +231,25 @@ function packCoverage(cov, w, h, bpp) {
+   return out;
+ }
+ 
++/**
++ * Lifts 8-bit coverage to 255 * (cov / 255)^(1 / gamma), rounded: 0 and 255 stay, partial pixels grow.
++ *
++ * @param {Uint8Array|number[]} cov  Coverage, one byte per pixel.
++ * @param {number} gamma             1 returns `cov` unchanged.
++ * @returns {Uint8Array|number[]}
++ */
++export function applyCoverageGamma(cov, gamma) {
++  if (gamma === 1) return cov;
++  const table = Array.from({length: 256}, (_, c) => Math.round(255 * (c / 255) ** (1 / gamma)));
++  return Array.from(cov, c => table[c]);
++}
++
+ /**
+  * Rasterizes a single codepoint into a glyph record + appended bitmap bytes.
+  *
+  * @returns {{glyph:object, bytes:number[]}|null} null when the font has no glyph for the codepoint.
+  */
+-function bakeGlyph(font, cp, pixelSize, baseline, scale, bpp) {
++function bakeGlyph(font, cp, pixelSize, baseline, scale, bpp, gamma = 1) {
+   if (font.charToGlyphIndex(String.fromCodePoint(cp)) === 0 && cp !== 0x20)
+     return null;
+   const glyph = font.charToGlyph(String.fromCodePoint(cp));
+@@ -257,7 +273,7 @@ function bakeGlyph(font, cp, pixelSize, baseline, scale, bpp) {
+   };
+   const bytes =
+     r.width > 0 && r.height > 0
+-      ? packCoverage(r.coverage, r.width, r.height, bpp)
++      ? packCoverage(applyCoverageGamma(r.coverage, gamma), r.width, r.height, bpp)
+       : [];
+   return {glyph: glyphRec, bytes};
+ }
+@@ -272,6 +288,7 @@ function bakeGlyph(font, cp, pixelSize, baseline, scale, bpp) {
+  * @param {number} [opts.bpp]   Bits per pixel (default 4).
+  * @param {string|Array<number|string>} [opts.glyphs] Extra glyph coverage beyond ASCII (default 'ascii').
+  * @param {number|string|Array<number|string>} [opts.extraGlyphs] Per-app additions on top of `glyphs`.
++ * @param {number} [opts.gamma] Coverage gamma, cov^(1/gamma) before packing (default 1, none).
+  * @returns {{family:string, path:string, sizes:Array<object>}} Baked data ready for the C emitter.
+  *          Extras the font file has no glyph for are silently absent from each size's `extras`.
+  */
+@@ -282,9 +299,12 @@ export function bakeFont({
+   bpp = 4,
+   glyphs = 'ascii',
+   extraGlyphs,
++  gamma = 1,
+ }) {
+   if (![1, 2, 4, 8].includes(bpp))
+     throw new Error(`bpp must be 1, 2, 4, or 8 (got ${bpp})`);
++  if (!(typeof gamma === 'number' && gamma >= 0.5 && gamma <= 4))
++    throw new Error(`gamma must be a number from 0.5 to 4 (got ${gamma})`);
+   const font = opentype.parse(fs.readFileSync(path).buffer);
+   const extraCps = resolveExtras(glyphs, extraGlyphs);
+ 
+@@ -297,7 +317,7 @@ export function bakeFont({
+     const bitmap = [];
+     const dense = [];
+     for (let cp = ASCII_FIRST; cp <= ASCII_LAST; cp++) {
+-      const baked1 = bakeGlyph(font, cp, pixelSize, baseline, scale, bpp) || {
++      const baked1 = bakeGlyph(font, cp, pixelSize, baseline, scale, bpp, gamma) || {
+         glyph: {
+           bitmapOffset: 0,
+           width: 0,
+@@ -315,7 +335,7 @@ export function bakeFont({
+ 
+     const extras = [];
+     for (const cp of extraCps) {
+-      const b = bakeGlyph(font, cp, pixelSize, baseline, scale, bpp);
++      const b = bakeGlyph(font, cp, pixelSize, baseline, scale, bpp, gamma);
+       if (!b) continue; // font has no such glyph
+       b.glyph.bitmapOffset = b.bytes.length > 0 ? bitmap.length : 0;
+       bitmap.push(...b.bytes);
+diff --git a/bridges/quickjs/js/assets/font-config.mjs b/bridges/quickjs/js/assets/font-config.mjs
+index aba23bf..99966b7 100644
+--- a/bridges/quickjs/js/assets/font-config.mjs
++++ b/bridges/quickjs/js/assets/font-config.mjs
+@@ -28,7 +28,7 @@ const DEFAULT_SIZE = 16;
+  * @param {object} [fontConfig]             assets.config.js `fonts` block, keyed by family.
+  * @param {number[]} [discoveredSizes]      Sizes the bundle uses (font-sizes.mjs analyzeFontSizes).
+  * @returns {Array<{path:string, family:string, sizes:number[], bpp:number, glyphs:any,
+- *          extraGlyphs:any}>} One bakeFont() job per imported font.
++ *          extraGlyphs:any, gamma:number}>} One bakeFont() job per imported font.
+  */
+ export function resolveFontJobs(fonts, fontConfig = {}, discoveredSizes = []) {
+   return [...fonts.entries()].map(([family, path]) => {
+@@ -44,6 +44,7 @@ export function resolveFontJobs(fonts, fontConfig = {}, discoveredSizes = []) {
+       bpp: fc.bpp ?? 4,
+       glyphs: fc.glyphs ?? 'ascii',
+       extraGlyphs: fc.extraGlyphs,
++      gamma: fc.gamma ?? 1,
+     };
+   });
+ }

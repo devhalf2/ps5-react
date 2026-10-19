@@ -1,5 +1,54 @@
 # Changelog
 
+## Unreleased — full-screen fades through the fade cache
+
+- The PS5 and desktop builds turn on the engine's fade cache (one 1920x1080 slot, 8.3 MB of .bss):
+  while a fading group's content stays still, each frame blends one copy of it captured on the first
+  frame instead of re-rendering the subtree. An app can fade its whole screen (Overdrive darkens it
+  between pages) at the cost of a blend per frame.
+- `embeddedReact-fade-cache-scope.patch`: only a change inside the cached group drops its copy; a
+  focus ring's moving light or a progress bar elsewhere made every frame a miss before. A nested
+  opacity value inside a cached group now shows (it showed frozen). A smaller translucent group no
+  longer evicts a larger one mid-fade; it takes the strip path, as without the cache.
+- A group must clip its children (`overflow-hidden`) and fit 1920x1080 to use the cache: a child
+  painting past the group's box sends it down the strip path.
+
+## Unreleased — baked font coverage gamma
+
+- A baked font takes `gamma` in assets.config.js (default 1, unchanged): each pixel's coverage becomes
+  255 * (cov / 255)^(1 / gamma) before packing, at no runtime cost. The engine blends glyph edges in
+  sRGB, the PS5's own UI in linear light, so text read about half a weight lighter at the same font,
+  weight and size. With 1.8, SST section titles measure 3.15 px stems (2.8 before, the console 3.17)
+  and 20 px titles 3.74 (3.55, the console 3.92); 12 px counts stay open. Through
+  `embeddedReact-font-gamma.patch`.
+
+## Unreleased — per-edge reveal insets, row snapping, eased focus scrolling
+
+- `ScrollView` takes `revealInsets={{top, bottom, left, right}}`: the room, in logical px, kept between
+  the focused element and each edge of the viewport when focus scrolls it into view (32 for an edge
+  left out, as before). A list can run under an overlay at its edge (an app's button legend) and still
+  stop its focused row above it. A `scrollAnchor` aligns past the top inset, and with an explicit
+  bottom inset aligns only if the focused element then clears it.
+- `ScrollView` takes `revealSnap`: focus scrolling lands with one of its `scrollAnchor` rows' start the
+  top inset below the viewport top, the row nearest the least movement that still shows the focused
+  row whole, so a list cuts no row at its top and leaves no gap there. In such a list the focused element's anchor is its row, revealed
+  whole rather than aligned: a card around a focused button shows entire.
+- `ScrollView` takes `scrollMotion="ease-out"`: focus scrolling eases out over 240 ms, a quartic (45%
+  after 33 ms, 73% after 67 ms, on the target in whole pixels after 200 ms) and rests on the target
+  without overshoot, as the PS5 Store's rails do (measured frame by frame at 60 fps, they fit a quartic
+  over 235-238 ms and move for 180-200 ms). The default steady speed (speeding up over four frames, up to
+  40 logical px per frame) took about 270 ms for a 420 px row, under half of it done after 100 ms. A new
+  target starts a new 240 ms from where the view is; a nested `ScrollView` without the prop inherits
+  its enclosing one's.
+- The desktop preview passes the frame callback the time since the previous frame's callback. It was
+  the time since the previous frame ended, a few ms that left out the wait for vsync.
+- `useIsScrolling()` is true while the ScrollView around the caller, or one around it, is focus
+  scrolling, and re-renders only when that changes: an app hides its focus ring while a rail moves,
+  as the PS5 Store does.
+- An element focused before its first layout (a grid's first tile, focused as the grid mounts) is
+  revealed on that layout if it still has focus. The page stayed where it was, with focus off screen.
+- Without these props, focus scrolling is unchanged.
+
 ## Unreleased — render thread freed during downloads, RAR sets checked before decoding
 
 - `Archives.inspect` reads a RAR's first file header, then walks the next ones for about 100 ms

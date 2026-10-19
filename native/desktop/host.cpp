@@ -127,7 +127,7 @@ struct Host {
   GlPresenter presenter;
   FrameStats stats;
   bool log_frames = true, running = true, runtime_started = false, backend_started = false;
-  Uint32 previous_tick = 0, next_repeat = 0, next_image_stats = 0;
+  Uint32 previous_tick = 0, previous_js_tick = 0, next_repeat = 0, next_image_stats = 0;
   std::string image_stats;
   const char* held_action = nullptr;
   InputScript script;
@@ -178,7 +178,7 @@ struct Host {
       if (SDL_IsGameController(i) && (controller = SDL_GameControllerOpen(i))) break;
     std::printf("Physical controller: %s\n", controller ? SDL_GameControllerName(controller) : "not connected");
     desktop_set_controller(controller);
-    previous_tick = SDL_GetTicks();
+    previous_tick = previous_js_tick = SDL_GetTicks();
     er_perf_set_clock(perf_clock);
     return presenter.init(width, height);
   }
@@ -380,7 +380,11 @@ struct Host {
     stats.lap(FrameStats::input, now_us());
     er_perf_phase_begin(ER_PERF_PHASE_JS);
     er_runtime_pump();
-    const bool stepped = ps5_react_frame(er_runtime_context(), std::min<Uint32>(SDL_GetTicks() - previous_tick, 50));
+    // From the previous frame's step to this one's, so the frame time includes the swap's vsync wait
+    // (from the end of the previous frame, it was only the few ms since that wait).
+    const Uint32 js_tick = SDL_GetTicks();
+    const bool stepped = ps5_react_frame(er_runtime_context(), std::min<Uint32>(js_tick - previous_js_tick, 50));
+    previous_js_tick = js_tick;
     er_perf_phase_end(ER_PERF_PHASE_JS);
     if (!stepped) {
       std::fprintf(stderr, "Frame callback failed\n");

@@ -27,7 +27,9 @@
       "patches/embeddedReact-european-glyphs.patch",
       "patches/embeddedReact-text-shaper.patch",
       "patches/embeddedReact-text-direction.patch",
-      "patches/embeddedReact-text-clip.patch"
+      "patches/embeddedReact-text-clip.patch",
+      "patches/embeddedReact-font-gamma.patch",
+      "patches/embeddedReact-fade-cache-scope.patch"
     ]
   },
   "platform": {

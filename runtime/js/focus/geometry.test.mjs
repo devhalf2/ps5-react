@@ -3,7 +3,7 @@
 // Additional attribution term: see LICENSE-ATTRIBUTION.
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
-import {anchorOffset, catchUpSpeed, findClosest, findNearest, findWrap, revealOffset, scrollStep} from './geometry.js';
+import {anchorOffset, catchUpSpeed, easeOutAt, findClosest, findNearest, findWrap, revealOffset, scrollStep, snapRevealOffset} from './geometry.js';
 
 const rect = (x, y, width = 100, height = 100) => ({x, y, width, height});
 const grid = () => {
@@ -125,9 +125,64 @@ test('an anchor aligns its start past the margin, scrolls to 0 near the top, and
   assert.equal(anchorOffset(0, 700, 50, 100, 300, 1000, 10), revealOffset(0, 700, 50, 300, 1000, 10));
 });
 
+test('reveal keeps a margin of its own at each edge', () => {
+  // [before, after]: 40 px stays clear below the item, 10 above it.
+  assert.equal(revealOffset(0, 400, 50, 300, 1000, [10, 40]), 190);
+  assert.equal(revealOffset(500, 400, 50, 300, 1000, [10, 40]), 390);
+  assert.equal(revealOffset(0, 400, 50, 300, 1000, [10, 10]), revealOffset(0, 400, 50, 300, 1000, 10));
+  // An item larger than the viewport still aligns its start past the start margin.
+  assert.equal(revealOffset(0, 400, 500, 300, 1000, [10, 40]), 390);
+});
+
+test('an anchor aligns past the start margin and, given an end, aligns only if the item clears it', () => {
+  assert.equal(anchorOffset(0, 650, 100, 600, 300, 1000, [50, 10]), 550);
+  assert.equal(anchorOffset(0, 650, 100, 600, 300, 1000, [10, 10], 100), 590);
+  // 200 px at the end would cover the card: it moves the least instead, by both margins.
+  assert.equal(anchorOffset(0, 650, 100, 600, 300, 1000, [10, 10], 200), 460);
+});
+
+test('a snapping reveal lands on row starts, and moves the least when none shows the item', () => {
+  // 48 px rows from 4 px down in a 392 px viewport (8 rows and 4 px either side), 4 px margins.
+  const rows = Array.from({length: 20}, (_, i) => 4 + i * 48);
+  assert.equal(snapRevealOffset(0, 388, 48, 392, 1000, 4, rows), 48);
+  assert.equal(snapRevealOffset(48, 100, 48, 392, 1000, 4, rows), 48, 'a row in view does not move');
+  assert.equal(snapRevealOffset(96, 52, 48, 392, 1000, 4, rows), 48);
+  assert.equal(snapRevealOffset(48, 4, 48, 392, 1000, 4, rows), 0);
+  // Cards of two heights, 65 px kept clear at the bottom: the card start nearest the 159 px of least
+  // movement that still shows the focused card whole.
+  const cards = [0, 200, 392, 529];
+  assert.equal(snapRevealOffset(0, 529, 125, 560, 2000, [0, 65], cards), 200);
+  assert.equal(snapRevealOffset(200, 0, 167, 560, 2000, [0, 65], cards), 0);
+  // A card taller than the viewport aligns its start as without snapping.
+  assert.equal(snapRevealOffset(0, 100, 900, 560, 2000, [0, 65], [100]), 100);
+  assert.equal(snapRevealOffset(0, 1000, 125, 560, 2000, [0, 65], [300, 1100]), 630, 'none fits: least movement');
+  assert.equal(snapRevealOffset(0, 388, 48, 392, 30, 4, rows), 30, 'clamped to the content');
+});
+
+test('a snapping reveal into a section lands on the section row\'s own top, not the gap before it', () => {
+  // Downloads: sections 40 px apart, each row an anchor, a section's label inside its first row's.
+  // Section A: rows at 0 (label + card, 160) and 160 (140); section B from 340 (label + card, 160).
+  const starts = [0, 160, 340];
+  // Down onto B's first row in a 380 px viewport, 65 px clear at the bottom: neither A row start shows
+  // it whole, so B's label goes to the top (340), not 40 px down after A's end (300).
+  assert.equal(snapRevealOffset(0, 340, 160, 380, 2000, [0, 65], starts), 340);
+  // Up into A's last row from there: its own top, not B's gap.
+  assert.equal(snapRevealOffset(340, 160, 140, 380, 2000, [0, 65], starts), 160);
+});
+
 test('a scroll far behind its target is allowed faster than the cap, near it the cap holds', () => {
   assert.equal(catchUpSpeed(300, 1080, 60), 60);
   assert.equal(catchUpSpeed(-300, 1080, 60), 60);
   assert.equal(catchUpSpeed(1360, 1080, 60), 250);
   assert.equal(catchUpSpeed(-1360, 1080, 60), 250);
+});
+
+test('an eased-out scroll is a quarter done in one frame, slows, and rests on the target at its end', () => {
+  const frame = 1000 / 60;
+  const at = Array.from({length: 15}, (_, i) => easeOutAt(0, 420, (i + 1) * frame, 240));
+  assert.deepEqual(at, [105, 189, 255, 306, 344, 371, 391, 404, 412, 416, 419, 420, 420, 420, 420]);
+  assert.ok(at.every((y, i) => i === 0 || y - at[i - 1] <= at[i - 1] - (at[i - 2] ?? 0)), 'never speeds up');
+  assert.equal(easeOutAt(0, 420, 400, 240), 420, 'never past the target');
+  assert.equal(easeOutAt(420, 0, 2 * frame, 240), 231, 'and backwards');
+  assert.equal(easeOutAt(100, 100, 50, 240), 100);
 });

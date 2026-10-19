@@ -107,6 +107,11 @@ alignment.
 `embeddedReact-text-clip.patch` (Apache-2.0 engine and bridge files; not yet
 proposed upstream) adds `er_utf8_clip()` and clips Text, TextInput and span
 strings at a character boundary rather than a byte count.
+`embeddedReact-font-gamma.patch` (Apache-2.0 font baker, font config and test;
+not yet proposed upstream) adds a per-font coverage `gamma` to baked fonts.
+`embeddedReact-fade-cache-scope.patch` (Apache-2.0 compositor and test; not yet
+proposed upstream) drops the fade cache's copy only for a change inside the
+cached group, and keeps a smaller group from evicting a larger one mid-fade.
 Patches apply in the order the lock lists them, and may add files.
 
 `tools/bundle.mjs` adapts upstream Apache-2.0 tooling and preserves its notice.

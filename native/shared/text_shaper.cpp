@@ -635,6 +635,8 @@ Style style_at(const ERTextRenderParams* params, const std::uint8_t* span_map, s
 }
 
 void draw_glyph(const Layout& layout, const Glyph& g, int x, int line_top, const ERRect& clip, const Style& style) {
+  // A line feed or an invisible mark is in the baked run with no width: nothing to draw.
+  if (g.face < 0 && (g.id == '\n' || ignorable(g.id))) return;
   for (int pass = 0; pass < (style.bold ? 2 : 1); pass++) {
     if (g.face < 0) {
       er_text_draw_glyph(layout.baked, g.id, x + pass, line_top + layout.ascent - layout.baked->baseline, &clip,
@@ -773,6 +775,9 @@ bool claims(const char* text, const char* family, std::uint8_t font_size, std::u
       continue;
     }
     const std::uint32_t cp = next_codepoint(text, length, at);
+    // Bidi marks and isolates (LRM, RLM, embeddings, LRI...PDI) only the shaper drops: the baked path
+    // would draw them as a missing glyph.
+    if (cp == 0x200E || cp == 0x200F || (cp >= 0x202A && cp <= 0x202E) || (cp >= 0x2066 && cp <= 0x2069)) return true;
     if (ignorable(cp)) continue;
     if (needs_shaping(cp)) return true;
     if (!baked) baked = er_text_font(family, font_size);

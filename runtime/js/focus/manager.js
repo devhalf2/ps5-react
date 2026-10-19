@@ -131,7 +131,11 @@ export class FocusManager {
 
   /** Laid-out screen rectangle, before transforms and scrolling. @param {Node} node @param {Rect} rect */
   setRect(node, rect) {
+    const first = !node.rect;
     node.rect = rect;
+    // Focused before its first layout (a grid mounted with focus on its first tile): reveal it now,
+    // after the rest of this layout pass has set its anchors' rectangles, if it still has focus.
+    if (first && this.focused === node) this.schedule(() => { if (this.focused === node) this.reveal(node); });
   }
 
   /** @param {() => void} listener @returns {() => void} */
@@ -275,7 +279,8 @@ export class FocusManager {
 
   /**
    * Scrolls every scrolling ancestor, innermost first, until `node` is in view; each one aligns the
-   * nearest `scrollAnchor` ancestor that it contains directly, if any. @param {Node} node
+   * nearest `scrollAnchor` ancestor that it contains directly, if any. A node without a rectangle yet
+   * is revealed on its first layout (`setRect`). @param {Node} node
    */
   reveal(node) {
     let rect = node.rect;

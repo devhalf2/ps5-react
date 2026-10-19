@@ -36,6 +36,13 @@ set(ERUI_PERF_STATS ON CACHE BOOL "" FORCE)
 # A screen transition keeps the leaving screen mounted while the next one is created, so two full
 # screens must fit at once; the bridge needs a handle per node. Node creation fails silently past this.
 set(ERUI_MAX_NODES 2048 CACHE STRING "" FORCE)
+# The fade cache: while a translucent group's content is unchanged between frames (a pure opacity
+# fade), the engine blends one copy of it captured on the first frame instead of re-rendering and
+# re-compositing the subtree every frame. One 1920x1080 slot, 8.3 MB of .bss, so a full-screen fade
+# (an app darkening its whole screen between pages) costs a blend per frame. Any content change
+# anywhere drops the copy and that frame takes the strip path as before.
+set(ERUI_FADE_CACHE_W 1920 CACHE STRING "" FORCE)
+set(ERUI_FADE_CACHE_H 1080 CACHE STRING "" FORCE)
 foreach(FEATURE SMOKE RUNTEST SPLITTEST GCTEST COMPILE)
   set(ER_BRIDGE_QUICKJS_${FEATURE} OFF CACHE BOOL "" FORCE)
 endforeach()
