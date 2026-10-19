@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased — extraction and cover-loading fixes
+
+- Remote images: a load picked as cached whose bytes turned out evicted, stale or corrupt crashed the
+  loader when every connection was busy (a null transfer). It now waits for the next round, and a warm
+  URL with no free connection goes back to the front of its queue.
+- Extracted folders are 0755, a game's programs (`eboot.bin`, `.elf`, `.self`, `.prx`, `.sprx`, or a file
+  the archive marks executable) 0755 and other files 0644, through libarchive and rar-extract alike and
+  whatever the umask. Files were 0666 before, so a game folder's `eboot.bin` had no execute bit and the
+  console refused to launch it (CE-107750-0). Not yet confirmed on hardware.
+- An extraction's receipt (a checksum line per file) is written to its file through a 64 KiB buffer as
+  files complete, and read back a line at a time to sync the files and to recover a finished
+  extraction, instead of held whole in memory. Games packed as folders of many files failed with
+  "Extraction receipt exceeds the metadata limit." The receipt format is unchanged: extractions made
+  before still recover. The 100,000-entry limit stays, since the 7z preflight holds memory per entry.
+- An installable package is a file named `.pkg` or `.fpkg` (now in any case) that starts with the PKG
+  signature `\x7FCNT`, read once every file is written and again on recovery. A file so named that is
+  something else is no longer offered for install.
+
 ## Unreleased — full-screen fades through the fade cache
 
 - The PS5 and desktop builds turn on the engine's fade cache (one 1920x1080 slot, 8.3 MB of .bss):

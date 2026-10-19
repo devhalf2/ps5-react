@@ -433,6 +433,13 @@ directory only after successful reading and SHA-256 output receipts. A matching
 published directory is reverified; matching interrupted staging is restarted.
 Unowned destinations/staging are preserved. Image artifacts are flattened to the
 output root for ShadowMount scan depth; duplicate filenames fail without overwrite.
+`artifacts` lists the images (by extension) and the packages: files named `.pkg`
+or `.fpkg`, in any case, that start with the PKG signature (`\x7FCNT`); a file
+so named that is something else is left out. The receipt is streamed to disk a
+line per file, so its size does not limit the number of files (an archive may
+still hold at most 100,000 entries). Extracted folders are mode 0755, `eboot.bin` and
+`.elf`/`.self`/`.prx`/`.sprx` files (or any the archive marks executable) 0755,
+and other files 0644, whatever the process umask.
 
 `password` is optional, with at most 1024 UTF-8 bytes and no NUL. Wrong or missing
 passwords fail without publishing partial output or removing source volumes.

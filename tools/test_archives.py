@@ -132,16 +132,48 @@ def main():
   assert run("zip",[zip])[0]=="completed"
   assert (root/"zip/game.ffpfsc").read_bytes()==DATA
   # The game runs as another user than the app: an extracted tree only its owner reads freezes the console
-  # at launch. Every folder and file is open to everyone, the extraction root included.
+  # at launch, and an eboot.bin without execute permission fails with CE-107750-0. Folders, the extraction
+  # root included, and programs are 0755, other files 0644, whatever the umask.
+  PROGRAMS={"eboot.bin","libc.prx","libSceFios2.sprx","tool"}
   def open_to_all(tree):
    for p in [tree,*tree.rglob("*")]:
     if p.name.startswith(".ps5-react-"):continue
     mode=p.stat().st_mode&0o777
-    assert mode==(0o777 if p.is_dir() else 0o666),(p,oct(mode))
+    assert mode==(0o755 if p.is_dir() or p.name in PROGRAMS else 0o644),(p,oct(mode))
   app=root/"app.zip"
-  with zipfile.ZipFile(app,"w") as z:z.writestr("PPSA01473-app/sce_sys/param.json","{}");z.writestr("PPSA01473-app/eboot.bin",DATA)
-  assert run("zip-app",[app])[0]=="completed"
-  open_to_all(root/"zip-app")
+  with zipfile.ZipFile(app,"w") as z:
+   z.writestr("PPSA01473-app/sce_sys/param.json","{}");z.writestr("PPSA01473-app/EBOOT.BIN",DATA)
+   z.writestr("PPSA01473-app/sce_module/libc.prx",DATA);z.writestr("PPSA01473-app/sce_module/libSceFios2.sprx",DATA)
+  umask=os.umask(0o077)
+  try:assert run("zip-app",[app])[0]=="completed"
+  finally:os.umask(umask)
+  PROGRAMS.add("EBOOT.BIN");open_to_all(root/"zip-app")
+  # A file the archive marks executable stays so; others lose any execute bit it gives them.
+  marked=root/"marked.tar"
+  with tarfile.open(marked,"w") as t:
+   for name,mode in [("app/tool",0o700),("app/data.bin",0o644)]:
+    entry=tarfile.TarInfo(name);entry.size=len(DATA);entry.mode=mode;t.addfile(entry,io.BytesIO(DATA))
+  assert run("tar-marked",[marked])[0]=="completed"
+  open_to_all(root/"tar-marked")
+  # Packages are told by their PKG signature, not their name: a file named .pkg that is something else is no
+  # artifact, a real one is whatever the case of its extension, through the ring, inline, rar-extract and recovery.
+  PKG=b"\x7fCNT"+DATA
+  def artifacts(name,parts,**env):
+   result=subprocess.run([str(binary),str(root/name),str(16<<20),*map(str,parts)],capture_output=True,text=True,timeout=20,
+    env={**os.environ,"ARCHIVE_ARTIFACTS":"1",**env})
+   out=result.stdout.splitlines();assert out[0]=="completed",(out,result.stderr)
+   return sorted(line[9:] for line in result.stderr.splitlines() if line.startswith("artifact "))
+  packages=root/"packages.zip"
+  with zipfile.ZipFile(packages,"w") as z:
+   z.writestr("game.pkg",PKG);z.writestr("update/GAME-UPDATE.PKG",PKG);z.writestr("fake.pkg",zip.read_bytes())
+   z.writestr("tiny.fpkg",b"\x7fC");z.writestr("readme.txt",PKG);z.writestr("nested/game.ffpfsc",DATA)
+  expected=["game.ffpfsc","game.pkg","update/GAME-UPDATE.PKG"]
+  for name,env in (("packages-ring",{}),("packages-inline",{"ARCHIVE_PIPELINE_BYTES":"0"})):
+   assert artifacts(name,[packages],**env)==expected
+   assert artifacts(name,[packages],**env)==expected
+  for name,blob,found in (("rar-fake-pkg",DATA,[]),("rar-real-pkg",PKG,["game.pkg"])):
+   p=root/(name+".rar");p.write_bytes(plain_rar5("game.pkg",blob))
+   assert artifacts(name,[p])==found and artifacts(name,[p])==found
   # A heap without room for an in-process extraction fails it cleanly, with nothing written.
   os.environ["ARCHIVE_NO_MEMORY"]="1"
   try:out=run("zip-no-memory",[zip])
@@ -229,11 +261,36 @@ def main():
   with tarfile.open(tar,"w") as t:
    entry=tarfile.TarInfo("nested/file.bin");entry.size=len(DATA);t.addfile(entry,io.BytesIO(DATA))
   assert run("tar",[tar])[0]=="completed"
+  # A game folder whose receipt (a line per file, here of long paths kept under the desktop's 1024-byte path
+  # limit) runs past the 16 MiB a receipt held in memory could take:
+  # through the write ring and inline, then recovered line by line by a later run.
+  many=root/"many.tar";deep="/".join(f"{i:02d}"+"m"*188 for i in range(4));count=20500
+  with tarfile.open(many,"w",format=tarfile.PAX_FORMAT) as t:
+   for i in range(count):
+    entry=tarfile.TarInfo(f"{deep}/f{i:05d}.bin");entry.size=4;t.addfile(entry,io.BytesIO(i.to_bytes(4,"little")))
+  def many_run(name,**env):
+   return subprocess.check_output([str(binary),str(root/name),str(1<<30),str(many)],text=True,timeout=300,env={**os.environ,**env}).splitlines()
+  for name,env in (("many-ring",{}),("many-inline",{"ARCHIVE_PIPELINE_BYTES":"0"})):
+   out=many_run(name,**env);assert out[0]=="completed",out
+   receipt=root/name/".ps5-react-extraction"
+   lines=receipt.read_bytes().split(b"\n")
+   assert receipt.stat().st_size>16*1024*1024 and len(lines)==count+2 and lines[-1]==b"",(receipt.stat().st_size,len(lines))
+   assert (root/name/deep/f"f{count-1:05d}.bin").read_bytes()==(count-1).to_bytes(4,"little")
+   out=many_run(name,**env);assert out[0]=="completed",out
+  # A receipt cut short mid-line no longer matches its files.
+  receipt=root/"many-ring/.ps5-react-extraction";receipt.write_bytes(receipt.read_bytes()[:-10])
+  out=many_run("many-ring");assert out[0]=="failed" and "receipt" in out[-1],out
+  subprocess.run(["rm","-rf",str(root/"many-ring"),str(root/"many-inline"),str(many)],check=True)
   # rar-extract: images published at the set root, unsafe names and links refused, a missing middle
   # volume named as such.
   p=root/"plain.rar";p.write_bytes(plain_rar5("nested/deeper/game.ffpfsc",DATA))
   assert run("rar-plain",[p])[0]=="completed"
   assert (root/"rar-plain/game.ffpfsc").read_bytes()==DATA
+  p=root/"app.rar";p.write_bytes(plain_rar5("PPSA01473-app/eboot.bin",DATA))
+  umask=os.umask(0o077)
+  try:assert run("rar-app",[p])[0]=="completed"
+  finally:os.umask(umask)
+  open_to_all(root/"rar-app")
   # The phase goes from extracting to finishing once every entry is decoded, and a completed task ends in it:
   # through the write ring (files synced of the total), inline writes, rar-extract's "s" line, and an older
   # rar-extract without that line.

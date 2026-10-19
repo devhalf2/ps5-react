@@ -105,6 +105,14 @@ def compile_client(directory):
     return binary
 
 
+def disk_key(url):
+    """The disk cache's file name for a URL: its 64-bit FNV-1a hash in hex."""
+    value = 14695981039346656037
+    for byte in url.encode():
+        value = ((value ^ byte) * 1099511628211) & (2**64 - 1)
+    return f"{value:016x}"
+
+
 def argb(path, width, height):
     """Premultiplied ARGB8888 words to an RGBA image."""
     pixels = struct.unpack(f"<{width * height}I", path.read_bytes())
@@ -206,8 +214,15 @@ def main():
         first = run("load", origin + "/photo.jpg?disk", 64, 64, COVER, directory / "pixels", cache=cache)
         again = run("load", origin + "/photo.jpg?disk", 32, 32, COVER, directory / "pixels", cache=cache)
         assert first["ready"] and again["ready"] and len(Handler.requests) == before + 1, (first, again)
+        # With all 32 connections busy, a load whose disk-cached bytes are corrupt waits for a connection.
+        busy_cache = directory / "busy-cache"
+        busy_cache.mkdir()
+        corrupt = origin + "/red.png?corrupt"
+        (busy_cache / disk_key(corrupt)).write_bytes(b"x")
+        busy = run("busy", origin + "/slow.jpg", corrupt, cache=busy_cache)
+        assert busy == {"loaded": 33, "ready": 33}, busy
         print("Remote images: cover/contain/stretch fitting without enlargement, box-filter quality, premultiplied "
-              "alpha, error messages, allocation failure and recovery, shared fetches, cancellation, LRU eviction, memory holds, heap pressure and the disk cache passed.")
+              "alpha, error messages, allocation failure and recovery, shared fetches, cancellation, busy connections, LRU eviction, memory holds, heap pressure and the disk cache passed.")
     server.shutdown()
 
 

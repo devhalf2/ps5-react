@@ -104,6 +104,15 @@ int main(int argc, char** argv) {
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
     images::release(id, false);
     std::printf("{\"reported\":%zu}\n", wait(1, 400).size());
+  } else if (mode == "busy" && argc >= 4) {
+    // Every connection carries a slow load when an image the disk cache lists turns out unreadable:
+    // it waits for a free connection instead of taking one that is not there.
+    for (int i = 0; i < 32; ++i) load(url + "?busy=" + std::to_string(i), 64, 64, 0, now);
+    std::this_thread::sleep_for(std::chrono::milliseconds(400));
+    load(argv[3], 64, 64, 0, now);
+    const auto results = wait(33, 20000);
+    const auto ready = std::count_if(results.begin(), results.end(), [](const images::Result& r) { return r.ready; });
+    std::printf("{\"loaded\":%zu,\"ready\":%td}\n", results.size(), ready);
   } else if (mode == "evict") {
     // Unused images over budget are evicted oldest first; images in use never are.
     images::set_cache_bytes(24 * 1024 * 1024);

@@ -46,6 +46,8 @@ int main(int argc,char** argv){
  if(!id){std::cout<<"failed\n"<<error;return 0;}
  auto started=std::chrono::steady_clock::now();
  while(true){for(const auto& s:archives::poll())if(ended(s)){
+  // ARCHIVE_ARTIFACTS=1 prints the installable files found to stderr, one per line.
+  if(std::getenv("ARCHIVE_ARTIFACTS"))for(const auto& path:s.artifacts)std::cerr<<"artifact "<<path<<"\n";
   std::cout<<s.state<<"\n"<<s.written<<"\n"<<s.error;
   if(!again){archives::stop();return 0;}
   std::cout<<"\n";setenv("PS5_REACT_RAR_WORKER",again,1);again=nullptr;cancel_after=-1;

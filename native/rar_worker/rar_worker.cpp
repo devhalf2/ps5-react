@@ -23,6 +23,7 @@
 #else
 #include <openssl/evp.h>
 #endif
+#include <cctype>
 #include <chrono>
 #include <condition_variable>
 #include <deque>
@@ -165,6 +166,22 @@ bool safe(const std::string& name) {
   return true;
 }
 
+// The engine's rule: the game runs as another user than the app and launches only from a tree everyone
+// reads, with its eboot.bin and ELF modules executable (CE-107750-0). Folders are 0755, programs (by name,
+// or marked executable by a Unix RAR) 0755 and other files 0644, whatever the umask.
+bool program(const std::string& name, const FileHeader& header) {
+  if (header.HSType == HSYS_UNIX && (header.FileAttr & 0111)) return true;
+  std::string base = name.substr(name.find_last_of('/') + 1);
+  for (char& c : base) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  for (const char* extension : {".elf", ".self", ".prx", ".sprx"})
+    if (base.ends_with(extension)) return true;
+  return base == "eboot.bin";
+}
+
+bool make_directory(const std::string& path) {
+  return !mkdir(path.c_str(), 0755) && !chmod(path.c_str(), 0755);
+}
+
 bool plain_directory(const std::string& path) {
   struct stat st;
   return !lstat(path.c_str(), &st) && S_ISDIR(st.st_mode);
@@ -176,7 +193,7 @@ bool make_parents(const std::string& root, const std::string& name, std::string&
   size_t start = 0, end;
   while ((end = name.find('/', start)) != std::string::npos) {
     target += "/" + name.substr(start, end - start);
-    if (mkdir(target.c_str(), 0777) && errno != EEXIST) return false;
+    if (!make_directory(target) && errno != EEXIST) return false;
     if (!plain_directory(target)) { errno = ENOTDIR; return false; }
     start = end + 1;
   }
@@ -568,10 +585,16 @@ std::string extract(Session& session, CommandData& command, Archive& archive, Cm
     std::string target;
     if (!make_parents(options.destination, name, target)) return strerror(errno);
     if (header.Dir) {
-      if (mkdir(target.c_str(), 0777) && (errno != EEXIST || !plain_directory(target))) return strerror(errno);
+      if (!make_directory(target) && (errno != EEXIST || !plain_directory(target))) return strerror(errno);
     } else {
-      const int fd = open(target.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0666);
+      const mode_t mode = program(name, header) ? 0755 : 0644;
+      const int fd = open(target.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, mode);
       if (fd < 0) return strerror(errno);
+      if (chmod(target.c_str(), mode)) {
+        const std::string error = strerror(errno);
+        close(fd);
+        return error;
+      }
       session.writer.begin(fd, name);
       session.writing = true;
     }
