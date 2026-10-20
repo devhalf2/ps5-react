@@ -55,7 +55,9 @@ JSValue extract(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   if (!id) return JS_ThrowPlainError(ctx,"archives.extract: %s",error.c_str());
   return JS_NewUint32(ctx,id);
 }
-// Reads only a few headers, so it runs on the render thread; a download in progress can be inspected.
+// The headers are read on a worker: a download writing to the same drive can hold one read for seconds.
+// The render thread waits a few frames at most and otherwise reports the read as pending.
+constexpr std::chrono::milliseconds inspect_wait{25};
 JSValue inspect(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   if (argc < 1 || !JS_IsArray(argv[0])) return JS_ThrowTypeError(ctx,"archives.inspect: expected sources");
   const JSValue length_value = JS_GetPropertyStr(ctx,argv[0],"length"); std::uint32_t length = 0;
@@ -69,10 +71,11 @@ JSValue inspect(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
     sources.push_back(std::move(file));
   }
   const host::CallScope scope("archives.inspect");
-  const auto inspection = archives::inspect(sources);
+  const auto [inspection, pending] = archives::inspect_soon(sources, inspect_wait);
   JSValue out = JS_NewObject(ctx);
   JS_SetPropertyStr(ctx,out,"kind",JS_NewString(ctx,inspection.kind.c_str()));
   JS_SetPropertyStr(ctx,out,"refusal",JS_NewString(ctx,inspection.refusal.c_str()));
+  if (pending) JS_SetPropertyStr(ctx,out,"pending",JS_TRUE);
   return out;
 }
 JSValue cancel(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {

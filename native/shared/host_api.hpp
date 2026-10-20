@@ -53,7 +53,8 @@
 //   network.poll()                 progress/results; consumes terminal snapshots
 //   archives.extract(sources, destination, maxBytes) task ID; bounded native archive worker
 //   archives.inspect(sources)      {kind, refusal}; file type from leading bytes and, for an archive,
-//                                  a decoder-memory refusal its headers so far justify; partial files ok
+//                                  a decoder-memory refusal its headers so far justify; partial files ok.
+//                                  Read on a worker; after 25 ms, the previous answer with pending: true
 //   archives.cancel(id)            requests cancellation; source volumes remain intact
 //   archives.poll()                state/error/written/entries/artifacts; consumes terminal results
 //   browser.capture(prefix, suffix, timeoutSeconds) ABI v7; Vikingfile capture task bound to a filename, or to any file when suffix is "/"

@@ -17,4 +17,15 @@ struct Inspection { std::string kind, refusal; };
 // `inspect_budget` (100 ms; tests change it).
 Inspection inspect(const std::vector<std::string>& sources);
 extern std::chrono::milliseconds inspect_budget;
+
+// inspect() on a worker thread, for the render thread: its reads wait on a drive a download keeps
+// busy, which held a tester's screen for 12 s. Waits at most `wait` for the answer. When the headers
+// are still being read, `pending` is set and the result is the previous answer for the same sources
+// (empty when none); the read finishes in the background and the next call for them returns it.
+struct PendingInspection { Inspection inspection; bool pending = false; };
+PendingInspection inspect_soon(const std::vector<std::string>& sources, std::chrono::milliseconds wait);
+// Joins the worker, after any read in progress; inspect_soon() starts it again.
+void stop_inspections();
+// Tests only: a pause before each worker read, to stand in for a slow drive.
+extern std::chrono::milliseconds inspect_delay;
 }

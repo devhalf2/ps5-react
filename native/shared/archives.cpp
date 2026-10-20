@@ -971,6 +971,7 @@ std::vector<Snapshot> poll() {
   return {snapshot};
 }
 void stop() {
+  stop_inspections();
   std::lock_guard lock(guard);
   if (!active) return;
   active->cancelled = true;

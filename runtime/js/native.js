@@ -360,9 +360,11 @@ export const Archives = Object.freeze({
     return networkTask(id, 'Archives.extract', destination, 'archives');
   },
   /** What the files' leading bytes are, and why their headers so far already rule out extraction.
-   * Reads headers synchronously: a RAR's first file header, then more for about 100 ms and one header past it.
+   * Reads headers on a worker: a RAR's first file header, then more for about 100 ms and one header past it.
+   * Returns within about 25 ms; when the drive is slower, `pending` is true, the result is the previous answer
+   * for these sources (empty strings when none), and a later call returns the finished read.
    * Also works on a download's growing `.part` file.
-   * @param {string[]} sources ordered volumes @returns {{kind: string, refusal: string}} */
+   * @param {string[]} sources ordered volumes @returns {{kind: string, refusal: string, pending?: true}} */
   inspect: sources => host().archives.inspect(sources),
   /** Whether `extract` takes `stream`. */
   streams: true,

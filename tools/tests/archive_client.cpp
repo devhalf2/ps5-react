@@ -29,6 +29,15 @@ int main(int argc,char** argv){
   if(argc>4&&std::string(argv[2])=="--budget"){archives::inspect_budget=std::chrono::milliseconds(std::stol(argv[3]));first=4;}
   const auto inspection=archives::inspect(std::vector<std::string>(argv+first,argv+argc));
   std::cout<<inspection.kind<<"\n"<<inspection.refusal<<"\n";return 0;}
+ // inspect-soon <delay ms> <path>: three calls as the render thread makes them, against a worker that
+ // pauses <delay ms> before each read; prints kind, refusal and pending for each.
+ if(argc==4&&std::string(argv[1])=="inspect-soon"){
+  archives::inspect_delay=std::chrono::milliseconds(std::stol(argv[2]));
+  const std::vector<std::string> sources{argv[3]};
+  const auto show=[&]{const auto [inspection,pending]=archives::inspect_soon(sources,std::chrono::milliseconds(25));
+   std::cout<<inspection.kind<<"|"<<inspection.refusal<<"|"<<(pending?"pending":"done")<<"\n";};
+  show();std::this_thread::sleep_for(archives::inspect_delay+std::chrono::milliseconds(500));show();show();
+  archives::stop();return 0;}
  if(argc<4)return 2;
  archives::Request request;request.destination=argv[1];request.max_bytes=std::stoull(argv[2]);
  // --stream: later volumes may appear while it runs; --cancel-after <ms> cancels it then; --again <worker>

@@ -7,6 +7,10 @@
   in `libkernel_sys.sprx`, `libkernel.sprx` and `libkernel_web.sprx`, and reads the OpenPSID from the
   `machdep.openpsid` sysctl when no module exports the call. The kernel log names the module or sysctl that
   answered. Not yet confirmed on hardware.
+- `Archives.inspect` no longer reads on the render thread. A tester's screen froze for up to 12 s while a
+  download kept the drive busy and the call read a RAR's headers. The native call now hands the read to a
+  worker and waits at most 25 ms; a slower read returns the previous answer for the same sources with
+  `pending: true`, and the next call returns the finished one. The return shape is otherwise unchanged.
 
 ## Unreleased — GPU shader layers
 

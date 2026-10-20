@@ -481,8 +481,13 @@ extract while downloading. Self-extracting executables are refused. This API doe
 register games. Desktop extraction and successful PS5 linking are not console
 execution evidence.
 
-`Archives.inspect(sources)` reads headers synchronously and returns
-`{kind, refusal}`. `kind` names the leading bytes: `rar`, `7z`, `zip`, `tar`,
+`Archives.inspect(sources)` returns `{kind, refusal}` synchronously. The headers
+are read on a worker thread and the call waits at most about 25 ms: a download
+writing to the same drive can hold a read for seconds. When the read is still
+running, the result also has `pending: true` and carries the previous answer for
+the same sources (empty strings when there is none); the read finishes in the
+background and the next call with those sources returns it. Call again later
+rather than treating a pending empty `kind` as an answer. `kind` names the leading bytes: `rar`, `7z`, `zip`, `tar`,
 `tar.gz`, `tar.bz2`, `tar.xz`, `tar.zst`, `pkg` (`\x7FCNT`), `exfat`, `ffpkg` (a
 UFS2 superblock), `ffpfs`, `ffpfsc`, or `''`. For an archive, `refusal` is the
 decoder-memory message above when the headers read so far already declare a

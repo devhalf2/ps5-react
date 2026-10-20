@@ -559,5 +559,10 @@ def main():
   assert inspect(partial("game.ffpkg",bytes(ufs),len(ufs)))==["ffpkg",""]
   assert inspect(partial("game.ffpfs",struct.pack("<QQ",1,0x20130315)+bytes(64),80))==["ffpfs",""]
   assert inspect(partial("game.ffpfsc",b"PFSC"+bytes(64),68))==["ffpfsc",""]
-  print("PASS: header inspection of partial downloads; ZIP/TAR/7z/multivolume RAR, decoder memory refusal, interrupted staging, verified recovery, missing parts and unsafe archive rejection")
+  # The render thread's inspection waits 25 ms: a slow read reports pending, the next call gets its answer,
+  # and a call during a later slow read gets that answer again, still pending.
+  soon=subprocess.check_output([str(binary),"inspect-soon","400",str(rar_parts[0])],text=True,timeout=20).splitlines()
+  assert soon==["||pending","rar||done","rar||pending"],soon
+  assert subprocess.check_output([str(binary),"inspect-soon","0",str(rar_parts[0])],text=True,timeout=20).splitlines()==["rar||done"]*3
+  print("PASS: header inspection of partial downloads, off the render thread; ZIP/TAR/7z/multivolume RAR, decoder memory refusal, interrupted staging, verified recovery, missing parts and unsafe archive rejection")
 if __name__=="__main__":main()

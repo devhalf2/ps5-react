@@ -3,16 +3,23 @@
 // Additional attribution term: see LICENSE-ATTRIBUTION.
 #include "archive_preflight.hpp"
 #include "archives.hpp"
+#include "thread_name.hpp"
+#include "worker_thread.hpp"
 #include <lzma.h>
 #include <algorithm>
 #include <array>
 #include <cerrno>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <fcntl.h>
+#include <map>
+#include <mutex>
 #include <string_view>
+#include <thread>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -722,5 +729,92 @@ Inspection inspect(const std::vector<std::string>& sources) {
   if (starts_with(boot, "EXFAT   ")) return {"exfat", {}};
   if (little_endian(ufs.data(), 4) == 0x19540119) return {"ffpkg", {}};
   return {};
+}
+
+std::chrono::milliseconds inspect_delay{0};
+namespace {
+struct Answer { Inspection inspection; bool fresh = false; };
+// One worker reads for every caller, in request order. `answers` holds the latest result per set of
+// sources; `fresh` marks one no caller has received yet.
+struct Inspector {
+  std::mutex mutex;
+  std::condition_variable changed;
+  std::deque<std::vector<std::string>> queue;
+  std::vector<std::string> running;
+  std::map<std::vector<std::string>, Answer> answers;
+  bool started = false, stopping = false;
+  WorkerThread thread;
+} inspector;
+// Bounds the memory held for callers that never ask again.
+constexpr std::size_t max_answers = 64, max_queued = 16;
+
+void inspect_loop() {
+  name_thread("inspect");
+  std::unique_lock lock(inspector.mutex);
+  while (!inspector.stopping) {
+    if (inspector.queue.empty()) {
+      inspector.changed.wait(lock);
+      continue;
+    }
+    inspector.running = std::move(inspector.queue.front());
+    inspector.queue.pop_front();
+    lock.unlock();
+    if (inspect_delay.count()) std::this_thread::sleep_for(inspect_delay);
+    auto result = inspect(inspector.running);
+    lock.lock();
+    if (inspector.answers.size() >= max_answers) inspector.answers.clear();
+    inspector.answers[inspector.running] = {std::move(result), true};
+    inspector.running.clear();
+    inspector.changed.notify_all();
+  }
+}
+}
+
+PendingInspection inspect_soon(const std::vector<std::string>& sources, std::chrono::milliseconds wait) {
+  std::unique_lock lock(inspector.mutex);
+  if (!inspector.started) {
+    inspector.stopping = false;
+    // The parsers are shallow; xz and zstd header decoders want more than the console's default stack.
+    inspector.started = inspector.thread.start(inspect_loop, 1024 * 1024);
+    if (!inspector.started) {
+      lock.unlock();
+      return {inspect(sources), false};
+    }
+  }
+  const auto take = [&](PendingInspection& out) {
+    const auto found = inspector.answers.find(sources);
+    if (found == inspector.answers.end() || !found->second.fresh) return false;
+    found->second.fresh = false;
+    out = {found->second.inspection, false};
+    return true;
+  };
+  PendingInspection out;
+  if (take(out)) return out;
+  const bool queued = inspector.running == sources ||
+                      std::find(inspector.queue.begin(), inspector.queue.end(), sources) != inspector.queue.end();
+  if (!queued) {
+    if (inspector.queue.size() >= max_queued) inspector.queue.pop_front();
+    inspector.queue.push_back(sources);
+    inspector.changed.notify_all();
+  }
+  if (inspector.changed.wait_for(lock, wait, [&] { return take(out); })) return out;
+  const auto previous = inspector.answers.find(sources);
+  if (previous != inspector.answers.end()) out.inspection = previous->second.inspection;
+  out.pending = true;
+  return out;
+}
+
+void stop_inspections() {
+  {
+    std::lock_guard lock(inspector.mutex);
+    if (!inspector.started) return;
+    inspector.stopping = true;
+    inspector.changed.notify_all();
+  }
+  inspector.thread.join();
+  std::lock_guard lock(inspector.mutex);
+  inspector.started = false;
+  inspector.queue.clear();
+  inspector.answers.clear();
 }
 }
