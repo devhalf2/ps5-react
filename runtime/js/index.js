@@ -13,7 +13,7 @@ export {View, Image, Pressable, ScrollView, VirtualList, FocusScope, useFocusabl
 export {motion, AnimatePresence, transitions} from './motion/index.js';
 export {DownloadFormats} from './download-formats.js';
 export {ShaderView} from './shader.js';
-export {BootIntro} from './boot-intro.js';
+export {BootIntro, BOOT_INTRO_STAGES} from './boot-intro.js';
 export {Platform, DeviceInfo, FileSystem, Notifications, Users, Controller, useGamepad, Linking, Power, Fonts, BackHandler,
   Http, Downloads, Archives, Packages, BrowserCapture, Sound} from './native.js';
 

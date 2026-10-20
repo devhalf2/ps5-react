@@ -4,7 +4,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {convertUniforms, ShaderLayer, shaderHost, uniformValue} from './shader-layer.js';
-import {BOOT_INTRO_TIMING, bootIntroSchedule} from './boot-intro-timeline.js';
+import {BOKEH_SKIP_START, BOOT_INTRO_TIMING, bootIntroSchedule} from './boot-intro-timeline.js';
 
 test('uniform values: numbers, vectors and colors; anything else names the uniform', () => {
   assert.equal(uniformValue('uSpeed', 0.5), 0.5);
@@ -61,4 +61,17 @@ test('boot intro schedule: the reference timeline, scaled by speed, without a lo
   assert.equal(bare.scene, 0);
   assert.ok(Math.abs(bare.done - (T.scene + T.reveal)) < 1e-9);
   assert.throws(() => bootIntroSchedule({logo: true, speed: 0}), /BootIntro/);
+});
+
+test('boot intro schedule: skipping the bokeh starts the scene at the burst; only logo and bokeh can go', () => {
+  const T = BOOT_INTRO_TIMING;
+  const full = bootIntroSchedule({logo: true});
+  const quick = bootIntroSchedule({logo: true, skip: ['bokeh']});
+  assert.equal(quick.start, BOKEH_SKIP_START);
+  assert.equal(quick.logoOut, full.logoOut);
+  assert.ok(quick.scene < full.scene);
+  assert.ok(Math.abs(quick.reveal - quick.scene - (T.scene - BOKEH_SKIP_START)) < 1e-9);
+  assert.equal(bootIntroSchedule({logo: true, skip: ['logo']}).scene, 0);
+  assert.throws(() => bootIntroSchedule({logo: true, skip: ['beam']}), /cannot skip "beam"/);
+  assert.equal(bootIntroSchedule({logo: true, logoIn: 0, logoHold: 1}).logoOut, 1);
 });

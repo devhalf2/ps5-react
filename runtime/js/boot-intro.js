@@ -7,9 +7,10 @@ import {createElement, useEffect, useRef, useState} from 'react';
 import {View} from 'embedded-react';
 import {ShaderView} from './shader.js';
 import {motion} from './motion/index.js';
-import {BOOT_INTRO_TIMING, bootIntroSchedule} from './boot-intro-timeline.js';
+import {subscribeInput} from './input.js';
+import {BOOT_INTRO_STAGES, BOOT_INTRO_TIMING, bootIntroSchedule} from './boot-intro-timeline.js';
 
-export {BOOT_INTRO_TIMING};
+export {BOOT_INTRO_STAGES, BOOT_INTRO_TIMING};
 
 // Scene time of the shader's own timeline origin (the burst reference): t = scene - 3.0.
 const SCENE_OFFSET = 3.0;
@@ -19,6 +20,8 @@ uniform float uTime;
 uniform vec2 uResolution;
 uniform float uSpeed;
 uniform float uFadeOut;
+uniform float uStart;
+uniform float uBokeh;
 out vec4 fragColor;
 
 float hash12(vec2 p) {
@@ -78,15 +81,16 @@ void main() {
   vec2 q = vec2(gl_FragCoord.x, uResolution.y - gl_FragCoord.y) / uResolution.y;
   float px = 1.0 / uResolution.y;
   // t: reference seconds, 0 three seconds into the scene (the teal discs come at 0.5, the burst at 0.8).
-  float t = uTime * uSpeed - ${SCENE_OFFSET.toFixed(1)};
+  // uStart: the scene time the layer opens at (past the bokeh when it is skipped).
+  float t = uStart + uTime * uSpeed - ${SCENE_OFFSET.toFixed(1)};
   vec3 col = vec3(0.0);
 
   // Navy bokeh: a huge disc that comes in from the right and grows, a second behind it, then teal discs.
   float grow = 1.0 - pow(1.0 - clamp((t + 3.0) / 2.2, 0.0, 1.0), 2.2);
-  float eA = smoothstep(-3.0, -1.6, t) * (0.75 + 0.25 * smoothstep(-0.9, 0.6, t)) * (1.0 - smoothstep(0.9, 1.08, t));
+  float eA = uBokeh * smoothstep(-3.0, -1.6, t) * (0.75 + 0.25 * smoothstep(-0.9, 0.6, t)) * (1.0 - smoothstep(0.9, 1.08, t));
   col += eA * vec3(0.038, 0.100, 0.165) * disc(q, vec2(mix(1.05, 0.66, grow) * A, 0.52), mix(0.55, 0.80, grow) + 0.05 * max(t, 0.0), 0.08);
   col += eA * vec3(0.012, 0.025, 0.040) * disc(q, vec2(mix(1.15, 0.86, grow) * A, 0.42), mix(0.40, 0.56, grow), 0.07);
-  float eT = smoothstep(0.5, 0.72, t) * (1.0 - smoothstep(0.8, 1.0, t));
+  float eT = uBokeh * smoothstep(0.5, 0.72, t) * (1.0 - smoothstep(0.8, 1.0, t));
   for (int i = 0; i < 11; i++) {
     vec2 c = vec2((0.30 + 0.72 * hash12(vec2(i, 3.0))) * A, 0.05 + 0.9 * hash12(vec2(i, 7.0)));
     c += vec2(0.03, -0.02) * t;
@@ -142,49 +146,74 @@ void main() {
 
 const fill = {position: 'absolute', left: 0, top: 0, right: 0, bottom: 0};
 
+// The buttons that skip the intro when `skippable`: Cross, Circle, Options.
+const SKIP_ACTIONS = new Set(['confirm', 'back', 'options']);
+// A skip crosses over in this long, in seconds (not scaled by speed).
+const SKIP_REVEAL = 0.25;
+
 /**
  * The PS5 boot sequence as an entrance: `logo` fades in and out on black, then the scene plays (navy
  * bokeh, a burst of warm dust, a beam of light with drifting particles) and `children` cross over it, as
  * the home screen does on the console. Without children the scene fades to black. `onDone` runs once the
  * scene is gone. Real time by default (`speed` 1, about 9.4 s with `logoHold` 1.5); `speed` 2 halves it.
- * The scene runs on the GPU; only the logo and the crossover touch the CPU.
- * @param {{logo?: any, children?: any, onDone?: () => void, logoHold?: number, speed?: number,
- *   resolutionScale?: number, style?: any}} props
+ * `skip` leaves stages out (BOOT_INTRO_STAGES: 'logo' or 'bokeh'); without the bokeh the logo hands over
+ * to the dust burst. `skippable` lets Cross, Circle or Options cut to `children` at once. `children`
+ * mount when they start crossing over. The scene runs on the GPU; only the logo and the crossover touch
+ * the CPU.
+ * `logoIn` 0 shows the logo from the first frame (to continue a system splash that showed it).
+ * @param {{logo?: any, children?: any, onDone?: () => void, logoIn?: number, logoHold?: number, speed?: number,
+ *   skip?: string[], skippable?: boolean, resolutionScale?: number, style?: any}} props
  */
-export function BootIntro({logo, children, onDone, logoHold = BOOT_INTRO_TIMING.logoHold, speed = 1,
-  resolutionScale = 1, style}) {
+export function BootIntro({logo, children, onDone, logoIn = BOOT_INTRO_TIMING.logoIn, logoHold = BOOT_INTRO_TIMING.logoHold, speed = 1,
+  skip = [], skippable = false, resolutionScale = 1, style}) {
   const T = BOOT_INTRO_TIMING, s = 1 / speed;
-  const at = bootIntroSchedule({logo: logo != null, logoHold, speed});
-  const [phase, setPhase] = useState(logo == null ? 'scene' : 'logo');
+  const hasLogo = logo != null && !skip.includes('logo');
+  const at = bootIntroSchedule({logo: hasLogo, logoIn, logoHold, speed, skip});
+  const [phase, setPhase] = useState(hasLogo ? 'logo' : 'scene');
+  const [reveal, setReveal] = useState(T.reveal * s);
   const done = useRef(onDone);
   done.current = onDone;
+  const timers = useRef([]);
+  const after = (seconds, next) => timers.current.push(setTimeout(next, seconds * 1000));
+  const clear = () => { timers.current.forEach(clearTimeout); timers.current = []; };
+  const finish = () => { setPhase('done'); done.current?.(); };
   useEffect(() => {
-    const timers = [];
-    const after = (seconds, next) => timers.push(setTimeout(next, seconds * 1000));
-    if (logo != null) {
+    if (hasLogo) {
       after(at.logoOut, () => setPhase('logo-out'));
       after(at.lead, () => setPhase('lead'));
       after(at.scene, () => setPhase('scene'));
     }
     after(at.reveal, () => setPhase('reveal'));
-    after(at.done, () => { setPhase('done'); done.current?.(); });
-    return () => timers.forEach(clearTimeout);
+    after(at.done, finish);
+    return clear;
   }, []);
+  const phaseNow = useRef(phase);
+  phaseNow.current = phase;
+  useEffect(() => {
+    if (!skippable) return undefined;
+    return subscribeInput(action => {
+      if (!SKIP_ACTIONS.has(action) || phaseNow.current === 'reveal' || phaseNow.current === 'done') return;
+      clear();
+      setReveal(SKIP_REVEAL);
+      setPhase('reveal');
+      after(SKIP_REVEAL, finish);
+    });
+  }, [skippable]);
 
   const showScene = phase === 'scene' || phase === 'reveal';
   const revealed = phase === 'reveal' || phase === 'done';
   return createElement(View, {style: [fill, {backgroundColor: '#000000'}, style]},
     phase === 'logo' || phase === 'logo-out' ? createElement(motion.View, {
-      key: 'logo', style: [fill, {alignItems: 'center', justifyContent: 'center'}], initial: {opacity: 0},
-      animate: phase === 'logo' ? {opacity: 1, transition: {duration: T.logoIn * s, ease: 'easeOut'}}
+      key: 'logo', style: [fill, {alignItems: 'center', justifyContent: 'center'}], initial: logoIn > 0 ? {opacity: 0} : false,
+      animate: phase === 'logo' ? {opacity: 1, transition: {duration: logoIn * s, ease: 'easeOut'}}
         : {opacity: 0, transition: {duration: T.logoOut * s, ease: 'easeIn'}},
     }, logo) : null,
     showScene ? createElement(ShaderView, {
       key: 'scene', source: bootIntroShader, resolutionScale, style: fill,
-      uniforms: {uSpeed: speed, uFadeOut: children == null ? 1 : 0},
+      uniforms: {uSpeed: speed, uFadeOut: children == null ? 1 : 0, uStart: at.start, uBokeh: skip.includes('bokeh') ? 0 : 1},
     }) : null,
     revealed && children != null ? createElement(motion.View, {
       key: 'next', style: fill, initial: {opacity: 0},
-      animate: {opacity: 1, transition: {duration: T.reveal * s, ease: 'easeInOut'}},
+      animate: {opacity: 1, transition: {duration: reveal, ease: 'easeInOut'}},
     }, children) : null);
 }

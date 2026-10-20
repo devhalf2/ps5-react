@@ -150,13 +150,24 @@ import {BootIntro} from '@ps5-react/core';
 </BootIntro>
 ```
 
+A store's entrance, about 4.3 s: its mark (already on screen in the system splash), the dust and the beam, no bokeh, skippable:
+
+```jsx
+<BootIntro logo={<Mark />} logoIn={0} logoHold={1.6} skip={['bokeh']} speed={1.1} skippable>
+  <Store />
+</BootIntro>
+```
+
 | Prop | Notes |
 | --- | --- |
 | `logo` | Shown on black first. Without it the sequence starts at the bokeh. |
-| `children` | The next screen, crossing over the scene's last 0.45 s and staying after it. Without children the scene fades to black. |
+| `children` | The next screen, mounted when it starts crossing over the scene's last 0.45 s, and staying after it. Without children the scene fades to black. |
 | `onDone` | Called when the scene is gone. |
+| `logoIn` | Seconds the logo fades in (0.5); 0 shows it from the first frame, continuing a system splash that showed it. |
 | `logoHold` | Seconds the logo stays (1.5). |
 | `speed` | 1 is the console's pace (about 9.5 s with a logo); 2 halves every phase. |
+| `skip` | Stages to leave out of `BOOT_INTRO_STAGES` (`logo`, `bokeh`, `burst`, `beam`): `'logo'` or `'bokeh'` (`[]`). Without the bokeh the scene opens 3.7 s in, where the burst's dark ground fades in, 0.15 s after the logo is gone, so the logo hands straight over to the dust; there is no blue at any point. The burst and the beam are one shot and cannot be skipped. |
+| `skippable` | Cross, Circle or Options cut to `children` (a 0.25 s crossover) (`false`). |
 | `resolutionScale` | Passed to the scene's `ShaderView` (1). |
 
 The scene is one `ShaderView` (`bootIntroShader`): bokeh discs, a room lit by a

@@ -14,17 +14,36 @@
 //   5.85-6.3       the next screen crosses over the scene (the home screen on the console)
 export const BOOT_INTRO_TIMING = {logoIn: 0.5, logoHold: 1.5, logoOut: 0.4, sceneLead: 0.8, scene: 5.85, reveal: 0.45};
 
+// The stages in their order; `skip` leaves some out. Only the logo and the bokeh can go: the burst and
+// the beam are one continuous shot. Without the bokeh the scene starts just before the burst
+// (BOKEH_SKIP_START of scene time, where the burst's dark ground fades in) after a shorter lead, so
+// the logo hands straight over to the dust.
+export const BOOT_INTRO_STAGES = ['logo', 'bokeh', 'burst', 'beam'];
+const SKIPPABLE = new Set(['logo', 'bokeh']);
+export const BOKEH_SKIP_START = 3.7;
+const BOKEH_SKIP_LEAD = 0.15;
+
 /**
- * When each phase starts, in seconds from mount, at `speed` (2 plays twice as fast).
- * @param {{logo: boolean, logoHold?: number, speed?: number}} options
- * @returns {{logoOut: number, lead: number, scene: number, reveal: number, done: number}}
+ * When each phase starts, in seconds from mount, at `speed` (2 plays twice as fast). `start` is the
+ * scene time the scene opens at (0 with the bokeh).
+ * @param {{logo: boolean, logoIn?: number, logoHold?: number, speed?: number, skip?: string[]}} options
+ * @returns {{logoOut: number, lead: number, scene: number, reveal: number, done: number, start: number}}
  */
-export function bootIntroSchedule({logo, logoHold = BOOT_INTRO_TIMING.logoHold, speed = 1}) {
-  if (!(speed > 0) || !(logoHold >= 0)) throw new RangeError(`BootIntro: speed must be above 0 and logoHold at least 0`);
+export function bootIntroSchedule({logo, logoIn = BOOT_INTRO_TIMING.logoIn, logoHold = BOOT_INTRO_TIMING.logoHold, speed = 1,
+  skip = []}) {
+  if (!(speed > 0) || !(logoHold >= 0) || !(logoIn >= 0)) {
+    throw new RangeError(`BootIntro: speed must be above 0, logoIn and logoHold at least 0`);
+  }
+  for (const stage of skip) {
+    if (!SKIPPABLE.has(stage)) throw new RangeError(`BootIntro: cannot skip ${JSON.stringify(stage)} (only ${[...SKIPPABLE].join(', ')})`);
+  }
   const T = BOOT_INTRO_TIMING, s = 1 / speed;
-  const logoOut = logo ? (T.logoIn + logoHold) * s : 0;
+  const bokeh = !skip.includes('bokeh');
+  if (skip.includes('logo')) logo = false;
+  const start = bokeh ? 0 : BOKEH_SKIP_START;
+  const logoOut = logo ? (logoIn + logoHold) * s : 0;
   const lead = logo ? logoOut + T.logoOut * s : 0;
-  const scene = logo ? lead + T.sceneLead * s : 0;
-  const reveal = scene + T.scene * s;
-  return {logoOut, lead, scene, reveal, done: reveal + T.reveal * s};
+  const scene = logo ? lead + (bokeh ? T.sceneLead : BOKEH_SKIP_LEAD) * s : 0;
+  const reveal = scene + (T.scene - start) * s;
+  return {logoOut, lead, scene, reveal, done: reveal + T.reveal * s, start};
 }
