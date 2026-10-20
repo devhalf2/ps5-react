@@ -118,6 +118,16 @@ OptionalSymbol<int (*)(char*)> hw_model_name{"sceKernelGetHwModelName"};
 // Fills 16 bytes: the console's OpenPSID, the ID the system shares with titles.
 OptionalSymbol<int (*)(std::uint8_t*)> open_psid{"sceKernelGetOpenPsId"};
 
+// sysctlbyname(), built from sysctl(): the title already imports sysctl from libkernel (OpenSSL and the
+// GL runtime use it), and an import a firmware's libkernel lacks would keep the title from starting.
+// {0, 3} is the kernel's name-to-OID lookup that sysctlbyname() makes.
+int sysctl_by_name(const char* name, void* out, std::size_t* size) {
+  int lookup[2] = {0, 3}, mib[CTL_MAXNAME] = {};
+  std::size_t mib_size = sizeof mib;
+  if (sysctl(lookup, 2, mib, &mib_size, name, std::strlen(name)) != 0) return -1;
+  return sysctl(mib, static_cast<unsigned>(mib_size / sizeof *mib), out, size, nullptr, 0);
+}
+
 bool all_zero(const std::uint8_t (&bytes)[16]) {
   for (const std::uint8_t byte : bytes)
     if (byte != 0) return false;
@@ -143,7 +153,7 @@ const char* console_id() {
   if (!source) {
     std::memset(bytes, 0, sizeof bytes);
     std::size_t size = sizeof bytes;
-    const int result = sysctlbyname("machdep.openpsid", bytes, &size, nullptr, 0);
+    const int result = sysctl_by_name("machdep.openpsid", bytes, &size);
     if (result == 0 && size == sizeof bytes && !all_zero(bytes)) source = "sysctl machdep.openpsid";
     else async_log::write("[PS5-REACT] sysctl machdep.openpsid=%d errno=%d size=%zu", result,
                           result == 0 ? 0 : errno, size);
