@@ -310,6 +310,7 @@ JSValue device_info(JSContext* ctx, JSValueConst, int, JSValueConst*) {
   JS_SetPropertyStr(ctx, object, "freeMemory", known(ctx, info.free_memory));
   JS_SetPropertyStr(ctx, object, "processTime", known(ctx, info.process_time));
   JS_SetPropertyStr(ctx, object, "language", known(ctx, info.language));
+  JS_SetPropertyStr(ctx, object, "consoleId", known(ctx, info.console_id));
   return object;
 }
 

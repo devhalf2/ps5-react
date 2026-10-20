@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased — console ID
+
+- `DeviceInfo.get().consoleId` (native API ABI v9): the console's OpenPSID from `sceKernelGetOpenPsId`,
+  as 32 lowercase hex digits. The PS5 host resolves the call from `libkernel_sys.sprx` like
+  `sceKernelGetHwModelName` and reads it once; a missing symbol, a failed call or an all-zero ID gives
+  `null`. The kernel log shows `[PS5-REACT] consoleId <first 4 digits>... (OpenPSID)` when it is read.
+  The desktop preview returns `PS5_REACT_CONSOLE_ID` (32 hex digits), else a fixed preview ID. Not yet
+  confirmed on hardware.
+
 ## Unreleased — subpixel letter spacing
 
 - `letterSpacing` takes fractions of a pixel: the bridge keeps it in 1/64 px and text advances, pens and

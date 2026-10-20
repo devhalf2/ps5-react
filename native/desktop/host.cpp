@@ -497,6 +497,33 @@ bool press(Host& host, SDL_Keycode key, int focus, int count, int detail) {
   return expect(focus, count, detail);
 }
 
+// DeviceInfo consoleId: the fixed preview ID, PS5_REACT_CONSOLE_ID lowercased, null when invalid.
+bool console_id_test() {
+  const char* saved = std::getenv("PS5_REACT_CONSOLE_ID");
+  const std::string original = saved ? saved : "";
+  const auto id = [](const char* value) {
+    if (value) setenv("PS5_REACT_CONSOLE_ID", value, 1);
+    else unsetenv("PS5_REACT_CONSOLE_ID");
+    host::DeviceInfo info;
+    host::device_info(info);
+    return std::string(info.console_id);
+  };
+  const bool ok = id(nullptr) == "70733572656163742d70726576696577" &&
+                  id("0123456789ABCDEF0123456789abcdef") == "0123456789abcdef0123456789abcdef" &&
+                  id("0123456789abcdef").empty() && id("0123456789abcdef0123456789abcdeg").empty();
+  id("00112233445566778899aabbccddeeff");
+  JSContext* ctx = er_runtime_context();
+  constexpr char script[] =
+    "globalThis.__ps5ReactNative.device.info().consoleId === '00112233445566778899aabbccddeeff'";
+  JSValue result = JS_Eval(ctx, script, sizeof script - 1, "console-id-test.js", JS_EVAL_TYPE_GLOBAL);
+  const bool bound = !JS_IsException(result) && JS_ToBool(ctx, result) == 1;
+  JS_FreeValue(ctx, result);
+  if (saved) setenv("PS5_REACT_CONSOLE_ID", original.c_str(), 1);
+  else unsetenv("PS5_REACT_CONSOLE_ID");
+  if (!ok || !bound) std::fprintf(stderr, "Console ID test failed (host %d, binding %d)\n", ok, bound);
+  return ok && bound;
+}
+
 bool storage_test() {
   double total = 0, free = 0;
   if (!storage::disk_bytes(4096, 100, 25, total, free) || total != 409600 || free != 102400 ||
@@ -652,7 +679,7 @@ bool storage_test() {
 }
 
 bool self_test(Host& host) {
-  if (!storage_test()) return false;
+  if (!storage_test() || !console_id_test()) return false;
   for (int i = 0; i < 4; ++i) if (!host.frame()) return false;
   if (!expect(0, 0, 0) || !host.snapshot("texture-initial.ppm")) return false;
   if (!press(host, SDLK_RETURN, 0, 1, 1) || !host.snapshot("texture-increment.ppm") ||

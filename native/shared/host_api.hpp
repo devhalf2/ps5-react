@@ -1,7 +1,7 @@
 // Copyright (C) 2026 half144 and PS5 React contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Additional attribution term: see LICENSE-ATTRIBUTION.
-// Native API contract (ABI v8) between the hosts and `@ps5-react/core`. The input actions hosts
+// Native API contract (ABI v9) between the hosts and `@ps5-react/core`. The input actions hosts
 // pass to `__ps5ReactDispatch` are a separate contract with its own version (runtime/js/input.js).
 //
 // host_api.cpp (shared) installs `globalThis.__ps5ReactNative` through
@@ -30,8 +30,9 @@
 //                                  console access is opt-in via app.json
 //   fs.diskUsage(path)             {total, free} in bytes; free available to the app
 //   device.info()                  {model, firmware, cpuTemperature, socTemperature,
-//                                   cpuFrequency, freeMemory, processTime, language}; unknown = null
+//                                   cpuFrequency, freeMemory, processTime, language, consoleId}; unknown = null
 //                                  language: the system language as a BCP 47 tag ('pt-BR')
+//                                  consoleId: ABI v9; the console's OpenPSID as 32 lowercase hex
 //   users.foreground()             {id, name} | null
 //   users.loggedIn()               [{id, name}]
 //   notify(message, subMessage)    boolean
@@ -159,6 +160,7 @@ struct DeviceInfo {
   std::int64_t free_memory = -1;   // bytes available to the app
   std::int64_t process_time = -1;  // µs of CPU time used by this process
   char language[16] = "";          // system language, BCP 47 ("en-US", "zh-Hans")
+  char console_id[33] = "";        // OpenPSID, 32 lowercase hex digits; fixed per console
 };
 void device_info(DeviceInfo& info);
 

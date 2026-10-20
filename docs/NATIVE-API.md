@@ -65,8 +65,18 @@ const label = Platform.select({ps5: 'Console', desktop: 'Preview', default: 'Unk
 | `freeMemory` | bytes | Memory available to the app |
 | `processTime` | µs | CPU time used by this process |
 | `language` | string | System language as a BCP 47 tag (`en-US`, `pt-BR`, `zh-Hans`) |
+| `consoleId` | string | The console's OpenPSID (`sceKernelGetOpenPsId`) as 32 lowercase hex digits, fixed per console; see below |
 
 Any value the host cannot read is `null`.
+
+`consoleId` identifies the console, not the user, and is the same for every
+title. Treat it as personal data: to bind something to a console, send a hash
+of it salted for your app rather than the ID itself. On PS5 it is read once per
+launch; when the call is missing or fails, it is `null` and the title keeps
+running. The desktop preview returns `PS5_REACT_CONSOLE_ID` when that holds 32
+hex digits (lowercased), a fixed preview ID
+(`70733572656163742d70726576696577`) when it is unset, and `null` when it is
+set to anything else, which lets you exercise the unknown case.
 
 ## FileSystem
 
@@ -336,6 +346,7 @@ title can load these modules; when one cannot, only the dependent call degrades:
 | Call | Module | Without it |
 | --- | --- | --- |
 | `DeviceInfo.get().model` | `libkernel_sys.sprx` | `null` |
+| `DeviceInfo.get().consoleId` | `libkernel_sys.sprx` | `null` |
 | `Notifications.show()` | `libSceNotification.sprx` | Returns `false` |
 
 PS5 `diskUsage()` uses the native-title `_fstatfs` export on a descriptor opened

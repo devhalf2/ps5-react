@@ -101,6 +101,31 @@ private:
 };
 
 OptionalSymbol<int (*)(char*)> hw_model_name{"libkernel_sys.sprx", "sceKernelGetHwModelName"};
+// Fills 16 bytes: the console's OpenPSID, the ID the system shares with titles.
+OptionalSymbol<int (*)(std::uint8_t*)> open_psid{"libkernel_sys.sprx", "sceKernelGetOpenPsId"};
+
+// The OpenPSID is fixed per console: it is read once and kept. Empty when unavailable.
+const char* console_id() {
+  static char id[33] = "";
+  static bool read = false;
+  if (read) return id;
+  read = true;
+  const auto get = open_psid.get();
+  if (!get) return id;
+  std::uint8_t bytes[16] = {};
+  const int result = get(bytes);
+  bool zero = true;
+  for (const std::uint8_t byte : bytes) zero = zero && byte == 0;
+  if (result != 0 || zero) {
+    async_log::write("[PS5-REACT] sceKernelGetOpenPsId=0x%08x%s", static_cast<unsigned>(result),
+                     result == 0 ? " (all zero)" : "");
+    return id;
+  }
+  for (int i = 0; i < 16; ++i) std::snprintf(id + i * 2, 3, "%02x", bytes[i]);
+  // The prefix alone confirms the call on hardware without publishing the console's ID.
+  async_log::write("[PS5-REACT] consoleId %.4s... (OpenPSID)", id);
+  return id;
+}
 
 constexpr int kSystemParamLanguage = 1; // SCE_SYSTEM_SERVICE_PARAM_ID_LANG
 // SCE_SYSTEM_PARAM_LANG_* values, indexed by ID.
@@ -122,6 +147,7 @@ bool user_name(int id, char* name, std::size_t size) {
 void host_platform_set_pad(hui::ps5::Pad* pad) { active_pad = pad; }
 void host_platform_prepare_filesystem_access() {
   hw_model_name.get();
+  open_psid.get();
 }
 
 namespace host {
@@ -287,6 +313,7 @@ void device_info(DeviceInfo& info) {
     async_log::write("[PS5-REACT] sceSystemServiceParamGetInt=0x%08x", static_cast<unsigned>(result));
   else if (language >= 0 && language < static_cast<int>(std::size(kLanguages)))
     std::snprintf(info.language, sizeof info.language, "%s", kLanguages[language]);
+  std::snprintf(info.console_id, sizeof info.console_id, "%s", console_id());
 }
 
 // Pad::open() initializes the user service before the bundle runs.
