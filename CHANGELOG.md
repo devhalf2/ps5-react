@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased — tester fixes (Pandora 0.3.0)
+
+- `DeviceInfo.get().consoleId` and `model`: a tester's PS5 could not resolve `sceKernelGetOpenPsId` or
+  `sceKernelGetHwModelName` from `libkernel_sys.sprx`, so the ID was `null`. The host now looks each call up
+  in `libkernel_sys.sprx`, `libkernel.sprx` and `libkernel_web.sprx`, and reads the OpenPSID from the
+  `machdep.openpsid` sysctl when no module exports the call. The kernel log names the module or sysctl that
+  answered. Not yet confirmed on hardware.
+
 ## Unreleased — GPU shader layers
 
 - `ShaderView` in `@ps5-react/core`: a GLSL 4.10 core fragment shader drawn on the GPU in a View's laid-out

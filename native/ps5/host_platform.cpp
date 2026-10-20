@@ -18,6 +18,7 @@
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <sys/mount.h>
+#include <sys/sysctl.h>
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
@@ -74,56 +75,86 @@ std::int64_t next_power_tick_us = 0;
 // The idle timer before rest mode is minutes long at its shortest; a tick restarts it, like input.
 constexpr std::int64_t kPowerTickIntervalUs = 30 * 1000000;
 
-// Resolves a function from a module the title does not link, on first use. Only
+// libkernel ships under a different name per process type; the variant a
+// title can open, and which of them exports a call, differs by firmware.
+constexpr const char* kKernelModules[] = {"libkernel_sys.sprx", "libkernel.sprx", "libkernel_web.sprx"};
+
+// Resolves a libkernel function the title does not link, on first use. Only
 // the modules the platform already needs are linked: a NEEDED module the title
 // cannot load would stop it from starting, while a failed lookup here disables
-// one call. The handle stays open for the title's lifetime.
+// one call. Each libkernel variant is tried in turn; the handle that answered
+// stays open for the title's lifetime.
 template <typename Function>
 class OptionalSymbol {
 public:
-  constexpr OptionalSymbol(const char* module, const char* name) : module_(module), name_(name) {}
+  constexpr explicit OptionalSymbol(const char* name) : name_(name) {}
   Function get() {
     if (!resolved_) {
       resolved_ = true;
-      void* handle = dlopen(module_, RTLD_LAZY);
-      void* symbol = handle ? dlsym(handle, name_) : nullptr;
-      if (!symbol) async_log::write("[PS5-REACT] %s unavailable from %s", name_, module_);
-      function_ = reinterpret_cast<Function>(symbol);
+      for (const char* module : kKernelModules) {
+        void* handle = dlopen(module, RTLD_LAZY);
+        void* symbol = handle ? dlsym(handle, name_) : nullptr;
+        if (!symbol) continue;
+        function_ = reinterpret_cast<Function>(symbol);
+        source_ = module;
+        break;
+      }
+      if (function_) async_log::write("[PS5-REACT] %s from %s", name_, source_);
+      else async_log::write("[PS5-REACT] %s unavailable from libkernel_sys, libkernel, libkernel_web", name_);
     }
     return function_;
   }
+  // The module that exported the function, once resolved.
+  const char* source() const { return source_; }
 
 private:
-  const char* module_;
   const char* name_;
   bool resolved_ = false;
   Function function_ = nullptr;
+  const char* source_ = "";
 };
 
-OptionalSymbol<int (*)(char*)> hw_model_name{"libkernel_sys.sprx", "sceKernelGetHwModelName"};
+OptionalSymbol<int (*)(char*)> hw_model_name{"sceKernelGetHwModelName"};
 // Fills 16 bytes: the console's OpenPSID, the ID the system shares with titles.
-OptionalSymbol<int (*)(std::uint8_t*)> open_psid{"libkernel_sys.sprx", "sceKernelGetOpenPsId"};
+OptionalSymbol<int (*)(std::uint8_t*)> open_psid{"sceKernelGetOpenPsId"};
 
-// The OpenPSID is fixed per console: it is read once and kept. Empty when unavailable.
+bool all_zero(const std::uint8_t (&bytes)[16]) {
+  for (const std::uint8_t byte : bytes)
+    if (byte != 0) return false;
+  return true;
+}
+
+// The OpenPSID is fixed per console: it is read once and kept. libkernel's call
+// answers first; the kernel's machdep.openpsid sysctl holds the same 16 bytes
+// when no libkernel variant exports it. Empty when neither answers.
 const char* console_id() {
   static char id[33] = "";
   static bool read = false;
   if (read) return id;
   read = true;
-  const auto get = open_psid.get();
-  if (!get) return id;
   std::uint8_t bytes[16] = {};
-  const int result = get(bytes);
-  bool zero = true;
-  for (const std::uint8_t byte : bytes) zero = zero && byte == 0;
-  if (result != 0 || zero) {
-    async_log::write("[PS5-REACT] sceKernelGetOpenPsId=0x%08x%s", static_cast<unsigned>(result),
-                     result == 0 ? " (all zero)" : "");
+  const char* source = nullptr;
+  if (const auto get = open_psid.get()) {
+    const int result = get(bytes);
+    if (result == 0 && !all_zero(bytes)) source = open_psid.source();
+    else async_log::write("[PS5-REACT] sceKernelGetOpenPsId=0x%08x%s", static_cast<unsigned>(result),
+                          result == 0 ? " (all zero)" : "");
+  }
+  if (!source) {
+    std::memset(bytes, 0, sizeof bytes);
+    std::size_t size = sizeof bytes;
+    const int result = sysctlbyname("machdep.openpsid", bytes, &size, nullptr, 0);
+    if (result == 0 && size == sizeof bytes && !all_zero(bytes)) source = "sysctl machdep.openpsid";
+    else async_log::write("[PS5-REACT] sysctl machdep.openpsid=%d errno=%d size=%zu", result,
+                          result == 0 ? 0 : errno, size);
+  }
+  if (!source) {
+    async_log::write("[PS5-REACT] consoleId unavailable");
     return id;
   }
   for (int i = 0; i < 16; ++i) std::snprintf(id + i * 2, 3, "%02x", bytes[i]);
   // The prefix alone confirms the call on hardware without publishing the console's ID.
-  async_log::write("[PS5-REACT] consoleId %.4s... (OpenPSID)", id);
+  async_log::write("[PS5-REACT] consoleId %.4s... (OpenPSID via %s)", id, source);
   return id;
 }
 
@@ -147,7 +178,7 @@ bool user_name(int id, char* name, std::size_t size) {
 void host_platform_set_pad(hui::ps5::Pad* pad) { active_pad = pad; }
 void host_platform_prepare_filesystem_access() {
   hw_model_name.get();
-  open_psid.get();
+  console_id();
 }
 
 namespace host {
@@ -292,7 +323,10 @@ bool read_dir(const char* real_path, void (*visit)(const char* name, void* user)
 void device_info(DeviceInfo& info) {
   if (const auto model_name = hw_model_name.get()) {
     char model[1024] = "";
-    if (model_name(model) == 0) std::snprintf(info.model, sizeof info.model, "%s", model);
+    if (const int result = model_name(model); result == 0)
+      std::snprintf(info.model, sizeof info.model, "%s", model);
+    else
+      async_log::write("[PS5-REACT] sceKernelGetHwModelName=0x%08x", static_cast<unsigned>(result));
   }
   SystemSwVersion version{};
   version.size = sizeof version;

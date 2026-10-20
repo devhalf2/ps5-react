@@ -72,8 +72,11 @@ Any value the host cannot read is `null`.
 `consoleId` identifies the console, not the user, and is the same for every
 title. Treat it as personal data: to bind something to a console, send a hash
 of it salted for your app rather than the ID itself. On PS5 it is read once per
-launch; when the call is missing or fails, it is `null` and the title keeps
-running. The desktop preview returns `PS5_REACT_CONSOLE_ID` when that holds 32
+launch: from `sceKernelGetOpenPsId`, looked up in `libkernel_sys.sprx`,
+`libkernel.sprx` and `libkernel_web.sprx` in turn, else from the kernel's
+`machdep.openpsid` sysctl (the same 16 bytes). The kernel log names the source
+(`consoleId <first 4 digits>... (OpenPSID via <source>)`). When neither answers,
+it is `null` and the title keeps running. The desktop preview returns `PS5_REACT_CONSOLE_ID` when that holds 32
 hex digits (lowercased), a fixed preview ID
 (`70733572656163742d70726576696577`) when it is unset, and `null` when it is
 set to anything else, which lets you exercise the unknown case.
@@ -345,8 +348,8 @@ title can load these modules; when one cannot, only the dependent call degrades:
 
 | Call | Module | Without it |
 | --- | --- | --- |
-| `DeviceInfo.get().model` | `libkernel_sys.sprx` | `null` |
-| `DeviceInfo.get().consoleId` | `libkernel_sys.sprx` | `null` |
+| `DeviceInfo.get().model` | `libkernel_sys.sprx`, `libkernel.sprx` or `libkernel_web.sprx` | `null` |
+| `DeviceInfo.get().consoleId` | The same, else the `machdep.openpsid` sysctl | `null` |
 | `Notifications.show()` | `libSceNotification.sprx` | Returns `false` |
 
 PS5 `diskUsage()` uses the native-title `_fstatfs` export on a descriptor opened
