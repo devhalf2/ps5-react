@@ -10,6 +10,11 @@
   nothing holds are evicted, least recently used first, until it fits; only when every cached image is
   held is it discarded. The `images:` stats line adds `cached`, `pinned` (held) and `registry` counts.
   From MyLuxy/overdrive 16ef057.
+- `ReleaseImages` (`<ReleaseImages when={released}>`): while `when` is true the remote images under it stop
+  holding their decoded cache entries, except those on screen when it turned true. They stay mounted and are
+  taken again, without a re-render when still cached, once it turns false. Scopes nest. For a screen kept
+  mounted while hidden and for the parts of a long page far from focus (docs/IMAGES.md). From
+  MyLuxy/overdrive's engine, which the store-front image fixes there (ef1d389, 7e905b9) rely on.
 
 ## Unreleased — tester fixes (Pandora 0.3.0)
 

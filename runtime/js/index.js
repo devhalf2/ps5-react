@@ -8,7 +8,7 @@ import {inspectableText} from './focus/inspect-text.js';
 export {AppRegistry, Animated, useAnimatedValue, Easing, LayoutAnimation, Svg, Path, Circle, Rect, Line, G}
   from 'embedded-react';
 export const Text = inspectableText(EngineText);
-export {View, Image, Pressable, ScrollView, VirtualList, FocusScope, useFocusable, useFocus, useIsFocused,
+export {View, Image, ReleaseImages, Pressable, ScrollView, VirtualList, FocusScope, useFocusable, useFocus, useIsFocused,
   useIsScrolling, useNavigationEvents} from './focus/index.js';
 export {motion, AnimatePresence, transitions} from './motion/index.js';
 export {DownloadFormats} from './download-formats.js';
