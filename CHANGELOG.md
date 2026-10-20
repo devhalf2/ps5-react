@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased — fork port (Pandora 0.3.2)
+
+- The engine's image registry holds 512 images (was 256). It holds every decoded image, the decoded
+  cache's up to 256 and the app's baked ones, so a cache full of small images filled it, and each new image
+  after that was discarded with "Image.load: the engine image registry is full" and never drew. 512 slots
+  cost 45 KB. From MyLuxy/overdrive 7e905b9.
+
 ## Unreleased — tester fixes (Pandora 0.3.0)
 
 - `DeviceInfo.get().consoleId` and `model`: a tester's PS5 could not resolve `sceKernelGetOpenPsId` or
