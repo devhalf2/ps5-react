@@ -6,6 +6,10 @@
   cache's up to 256 and the app's baked ones, so a cache full of small images filled it, and each new image
   after that was discarded with "Image.load: the engine image registry is full" and never drew. 512 slots
   cost 45 KB. From MyLuxy/overdrive 7e905b9.
+- When the registry is full all the same, the image about to be published makes room: cached images
+  nothing holds are evicted, least recently used first, until it fits; only when every cached image is
+  held is it discarded. The `images:` stats line adds `cached`, `pinned` (held) and `registry` counts.
+  From MyLuxy/overdrive 16ef057.
 
 ## Unreleased — tester fixes (Pandora 0.3.0)
 
