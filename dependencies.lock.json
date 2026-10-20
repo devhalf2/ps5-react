@@ -30,7 +30,8 @@
       "patches/embeddedReact-text-clip.patch",
       "patches/embeddedReact-font-gamma.patch",
       "patches/embeddedReact-fade-cache-scope.patch",
-      "patches/embeddedReact-subpixel-letter-spacing.patch"
+      "patches/embeddedReact-subpixel-letter-spacing.patch",
+      "patches/embeddedReact-view-cutout.patch"
     ]
   },
   "platform": {
