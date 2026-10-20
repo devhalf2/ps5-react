@@ -18,6 +18,16 @@
 - `Archives.extract` accepts a 7z whose encoded header decodes to up to 32 MiB (was the 16 MiB metadata
   limit): a game's file list in 7-Zip's default LZMA-compressed header passed it and was refused as
   "Unsupported or incomplete archive.". From MyLuxy/overdrive 0e7112e (ElijaOwO).
+- A 7z whose decoder needs more than the title heap's 64 MiB, up to 288 MiB, is extracted by `rar-extract`
+  (a `7ZX1` request, `native/rar_worker/sevenzip.cpp`, libarchive) in its own process instead of being
+  refused: repacks set a 256 MiB LZMA2 dictionary. The preflight reports the memory a 7z declares
+  (`preflight(sources, seven_zip_memory)`). The worker takes the decoder's memory and touches every page
+  before decoding, and stops with "The console has too little free memory to extract this archive now."
+  when the console needs over a second to give it; without a payload loader it fails with "This archive
+  needs the payload loader to extract: none answered on port 9021." What both extractors share (report
+  lines, path and mode rules, SHA-256, the writer thread) moved from `rar_worker.cpp` to `worker_io.hpp`;
+  the 7z extractor keeps the RAR one's modes (folders and programs 0755, other files 0644). The desktop
+  worker links Homebrew's libarchive. From MyLuxy/overdrive adde740.
 
 ## Unreleased — tester fixes (Pandora 0.3.0)
 
