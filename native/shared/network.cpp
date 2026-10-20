@@ -15,6 +15,7 @@
 #include <openssl/evp.h>
 #endif
 #include <algorithm>
+#include <climits>
 #include <array>
 #include <atomic>
 #include <charconv>
@@ -582,12 +583,21 @@ constexpr auto cooldown = std::chrono::seconds(5);
 // 25 of 27 for most of a 1.27 GB file, never full at the instant of the check); a 5xx, 429, 408 or broken connection
 // halves it, after which it grows by one a second. archive.org storage nodes answer HTTP 500 to some
 // ranges past about a dozen connections, while CDNs take all 64.
+//
+// A 503 or 429 is the server saying how much it takes. A FileKeeper tunnel streamed 64 ranges, then
+// answered new ones 503 with Retry-After: 60; halving, pausing the whole origin for that minute and
+// growing back to 64 stopped the download at 0 KB/s again and again. The first such answer opens an
+// overload episode lasting its Retry-After: the origin is capped (`ceiling`) at the connections that
+// were streaming then, and they keep going. Answers to requests sent before the episode change nothing.
+// New requests stop until the episode ends only when nothing was streaming, or when the server turns
+// away one sent at the capped count. The cap rises by one a minute after a minute without an episode.
+constexpr auto overload_relief = std::chrono::seconds(60);
 struct Window {
   std::string host;
   // `idle` counts the connections finished ranges left open, which the next transfers reuse.
-  unsigned allowed = 0, in_flight = 0, refusals = 0, idle = 0;
+  unsigned allowed = 0, in_flight = 0, refusals = 0, idle = 0, ceiling = UINT_MAX;
   bool congested = false;
-  Clock::time_point grown{}, shrunk{}, paused_until{}, refused{}, next_connect{};
+  Clock::time_point grown{}, shrunk{}, paused_until{}, refused{}, next_connect{}, overload_since{}, overload_until{}, relieved{};
   bool open(Clock::time_point now) const { return in_flight < allowed && now >= paused_until && (idle || now >= next_connect); }
   bool cooling(Clock::time_point now) const { return refusals && now-refused < cooldown; }
   std::chrono::milliseconds gap() const {
@@ -619,10 +629,34 @@ struct Window {
     platform_log(("download: " + host + " accepts connections again").c_str());
   }
   void grow(Clock::time_point now, unsigned limit) {
+    if (ceiling < limit && now-overload_until >= overload_relief && now-relieved >= overload_relief) {
+      ++ceiling; relieved = now;
+    }
+    limit = std::min(limit, ceiling);
     if (allowed >= limit || in_flight+allowed/10 < allowed || now-grown < std::chrono::seconds(1) ||
         now-shrunk < std::chrono::seconds(3)) return;
     allowed = std::min(limit, congested ? allowed+1 : allowed+std::max(2u, allowed/2));
     grown = now;
+  }
+  // A 503 or 429 to a request sent at `started`, while `streaming` other ranges of this origin received data.
+  void overloaded(Clock::time_point now, Clock::time_point started, unsigned streaming, unsigned retry_after) {
+    const auto wait = std::chrono::seconds(std::clamp(retry_after, 1u, 60u));
+    if (now >= overload_until) {
+      const unsigned cap = streaming ? streaming : std::max(1u, allowed/2);
+      if (cap < ceiling) ceiling = cap;
+      allowed = std::min(allowed, ceiling);
+      congested = true; shrunk = grown = overload_since = now; overload_until = now+wait;
+      if (!streaming) paused_until = std::max(paused_until, overload_until);
+      platform_log(("download: " + host + " is overloaded (HTTP 503/429, Retry-After " + std::to_string(retry_after) +
+                    " s); " + std::to_string(streaming) + " connections streaming, capped at " + std::to_string(ceiling) +
+                    (streaming ? "" : "; new ones wait it out")).c_str());
+      return;
+    }
+    if (started >= overload_since && paused_until < overload_until) {
+      paused_until = overload_until;
+      platform_log(("download: " + host + " turned away a request at " + std::to_string(allowed) +
+                    " connections; new ones wait out its Retry-After").c_str());
+    }
   }
   void shrink(Clock::time_point now, unsigned retry_after) {
     if (retry_after) paused_until = std::max(paused_until, now+std::chrono::seconds(std::min(retry_after, 60u)));
@@ -1485,13 +1519,27 @@ void Service::run_job(const std::shared_ptr<Job>& job) {
             const unsigned attempt = t.attempt;
             log_failure(t, attempt);
             if (refused_connection(t)) windows[t.window].refuse(now);
-            if (job->request.adaptive && congested(t)) windows[t.window].shrink(now, t.retry_after);
-            unsigned allowed_attempts = attempt_limit(t);
-            if (forget_mirror(*job, t)) allowed_attempts = std::max(allowed_attempts, 4u);
-            else if (forget_redirect(*job, t, attempt)) allowed_attempts = std::max(allowed_attempts, 4u);
-            if (attempt >= allowed_attempts) { job->fail(describe(t)); break; }
-            ++job->retries;
-            requeue(t, attempt, now+retry_delay(t, attempt));
+            // An overloaded origin that still streams other ranges is up: the range waits out its
+            // Retry-After without spending an attempt.
+            bool forgive = false;
+            if (job->request.adaptive && (t.status == 503 || t.status == 429)) {
+              const auto streaming = static_cast<unsigned>(std::count_if(transfers_.begin(), transfers_.end(),
+                [&](const Transfer& other) { return other.active && other.window == t.window && other.accepted &&
+                                                    other.status >= 200 && other.status < 300; }));
+              windows[t.window].overloaded(now, t.started, streaming, t.retry_after);
+              forgive = streaming && forgiven[t.piece] < 16;
+            } else if (job->request.adaptive && congested(t)) windows[t.window].shrink(now, t.retry_after);
+            if (forgive) {
+              ++forgiven[t.piece]; ++job->retries;
+              requeue(t, attempt-1, now+retry_delay(t, 1));
+            } else {
+              unsigned allowed_attempts = attempt_limit(t);
+              if (forget_mirror(*job, t)) allowed_attempts = std::max(allowed_attempts, 4u);
+              else if (forget_redirect(*job, t, attempt)) allowed_attempts = std::max(allowed_attempts, 4u);
+              if (attempt >= allowed_attempts) { job->fail(describe(t)); break; }
+              ++job->retries;
+              requeue(t, attempt, now+retry_delay(t, attempt));
+            }
           }
         }
         if (t.active && t.gated && t.status) {

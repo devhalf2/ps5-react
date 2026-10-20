@@ -76,7 +76,7 @@ task during cleanup if its lifetime belongs to that component.
 | --- | --- | --- |
 | `connections` | 8 | Integer 1–64; maximum ranges in flight |
 | `mirrors` | omitted | Up to 4 other http(s) URLs for the same file. Each is probed and kept only if its size and strong ETag match the primary (or a `sha256` is given); ranges then rotate over the primary and the mirrors, and a mirror that fails a range is dropped. Not combined with `pieces` |
-| `adaptive` | `true` | Per-origin congestion window (AIMD) under `connections`: starts at up to 8 and grows by half each second while full and healthy; HTTP 5xx/429/408 or a broken connection halves it (Retry-After also pauses that origin), after which it grows by one a second. `false` keeps `connections` fixed |
+| `adaptive` | `true` | Per-origin congestion window (AIMD) under `connections`: starts at up to 8 and grows by half each second while full and healthy; HTTP 5xx/408 or a broken connection halves it, after which it grows by one a second. HTTP 503/429 caps the origin instead (below). `false` keeps `connections` fixed |
 | `rangeBytes` | 32 MiB | Integer 1–256 MiB; at most 65,536 ranges |
 | `resume` | `true` | Reuses matching durable completed ranges; `false` refuses existing partial files |
 | `rejectHtml` | `false` | Rejects HTML content types and initial HTML signatures before a file can be published; provider pages are not binary downloads |
@@ -260,6 +260,16 @@ file: a range retries up to eight total attempts (a probe six), with exponential
 delay from 0.5 s to 30 s, jitter, and numeric Retry-After honored up to a minute.
 HTTP-date Retry-After is not supported. Each failed range logs its status,
 Content-Range, Content-Length, ETag, encoding and final URL.
+
+With `adaptive`, an HTTP 503 or 429 opens an overload episode on its origin that
+lasts the response's Retry-After (1 to 60 s). The origin is capped at the number of
+connections that were streaming at that moment, and they keep going. The failed range
+retries after Retry-After, without spending an attempt while other ranges stream.
+Answers to requests sent before the episode began change nothing. New requests wait
+out the episode only when nothing was streaming, or when a request sent at the
+capped count is turned away too. The cap rises by one connection a minute once a
+minute has passed without an episode. The log names the origin, the Retry-After,
+and the cap.
 The default concurrency is a starting point, not a measured PS5 optimum.
 
 The FIFO queue accepts eight unconsumed tasks, with **one task active at a time**;

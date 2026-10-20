@@ -44,6 +44,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
     # of the ranges asked for next answer 503.
     streams = set()
     suspend_refusals = 0
+    # /tunnel serves like the FileKeeper tunnel (tunnel1.dlproxy.uk): past TUNNEL_LIMIT concurrent ranges,
+    # new ones get a short 503 with Retry-After while the ranges already streaming go on. Each range
+    # request is logged as (time, Range, status).
+    TUNNEL_LIMIT = 8
+    tunnel_busy = 0
+    tunnel = []
 
     def respond(self, head=False):
         if self.path == "/hop":
@@ -60,6 +66,24 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_header("Content-Length", "0")
             self.end_headers()
             return
+        if self.path == "/tunnel" and self.headers.get("Range") not in (None, "bytes=0-0"):
+            with self.guard:
+                busy = Handler.tunnel_busy < Handler.TUNNEL_LIMIT
+                Handler.tunnel_busy += busy
+                Handler.tunnel.append((time.monotonic(), self.headers["Range"], 206 if busy else 503))
+            if not busy:
+                body = b"Too many connections, slow down"
+                self.send_response(503)
+                self.send_header("Retry-After", "2")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            try:
+                return self.serve(head)
+            finally:
+                with self.guard:
+                    Handler.tunnel_busy -= 1
         if not self.path.startswith("/throttled") or self.headers.get("Range") in (None, "bytes=0-0"):
             return self.serve(head)
         with self.guard:
@@ -139,7 +163,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.wfile.write(body)
             return
         piece = re.search(r"/piece([0-2])$", path)
-        payload = PIECES[int(piece[1])] if piece else LARGE if path == "/paced" else DATA
+        payload = PIECES[int(piece[1])] if piece else LARGE if path in ("/paced", "/tunnel") else DATA
         if path.endswith("-mutable") and self.mutated:
             payload = bytes(reversed(DATA))
         total = 4*1024**3 + 1024**2 if path == "/large-offset" else len(payload)
@@ -209,7 +233,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     time.sleep(0.006)
                 if path == "/suspend":
                     time.sleep(0.02)
-                if path == "/paced":
+                if path in ("/paced", "/tunnel"):
                     time.sleep(0.03)
                 if path == "/truncated" and selected != "bytes=0-0":
                     self.close_connection = True
@@ -452,6 +476,23 @@ def main():
         assert out["state"] == "completed", out
         assert path.read_bytes() == DATA
         assert {500, 503, 429} <= set(Handler.refused) and out["retries"] >= 3, (out, Handler.refused)
+        path.unlink()
+        # An origin that takes eight ranges and answers more with 503 and Retry-After: 2 is capped at the
+        # eight that were streaming, which go on: every 503 answers the one ramp past them, and no range is
+        # asked for again before the server's Retry-After.
+        path = directory / "tunnel"
+        started = time.monotonic()
+        out = run("/tunnel", path, connections=32, adaptive=True, range_bytes=4*1024*1024, digest=hashlib.sha256(LARGE).hexdigest())
+        elapsed = time.monotonic() - started
+        assert out["state"] == "completed", out
+        assert path.read_bytes() == LARGE
+        refused = [(at, selected) for at, selected, status in Handler.tunnel if status == 503]
+        assert refused, Handler.tunnel
+        assert refused[-1][0] - refused[0][0] < 1, refused
+        for at, selected in refused:
+            again = [later for later, other, _ in Handler.tunnel if other == selected and later > at]
+            assert again and again[0] - at >= 1.9, (selected, at, again)
+        print(f"Overloaded origin: {len(refused)} answered 503 in one burst, {out['retries']} retries, {elapsed:.1f} s")
         path.unlink()
         # A pinned redirect target that keeps failing is resolved again, and the new target is pinned.
         path = directory / "hop"

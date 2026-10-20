@@ -11,6 +11,14 @@
   download kept the drive busy and the call read a RAR's headers. The native call now hands the read to a
   worker and waits at most 25 ms; a slower read returns the previous answer for the same sources with
   `pending: true`, and the next call returns the finished one. The return shape is otherwise unchanged.
+- Downloads with `adaptive`: an HTTP 503 or 429 caps its origin at the connections still streaming, and
+  those keep going. Previously it halved the window, paused the whole origin for the Retry-After and grew
+  back. A FileKeeper tunnel (`tunnel1.dlproxy.uk`) took 64 connections, then answered new ranges 503 with
+  Retry-After: 60. Each further 503 extended the pause, so the download sat at 0 KB/s for minutes, recovered,
+  and stalled again. The failed ranges still wait out Retry-After, without spending attempts while others stream.
+  The cap rises by one a minute after a quiet minute.
+- The download stats line no longer prints a wrapped `recv=9007199254583538KB/s` when failed ranges give back
+  bytes.
 
 ## Unreleased — GPU shader layers
 
