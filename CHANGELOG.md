@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased — subpixel letter spacing
+
+- `letterSpacing` takes fractions of a pixel: the bridge keeps it in 1/64 px and text advances, pens and
+  widths run in 26.6 fixed point on the bitmap path as on the shaped one, each glyph drawn at its pen
+  rounded to the nearest pixel (`embeddedReact-subpixel-letter-spacing.patch`). It was rounded to whole
+  pixels, so `tracking-[0.25px]` drew nothing and 0.6 px drew a full pixel a glyph. Text with no letter
+  spacing draws and measures as before.
+- Tailwind: `theme.fontTracking` gives a face its spacing at each render size (`{'SST-Medium': {23: 0.34}}`),
+  applied where a class list sets that face or size and no `tracking-*` of its own.
+
 ## Unreleased — extraction and cover-loading fixes
 
 - Remote images: a load picked as cached whose bytes turned out evicted, stale or corrupt crashed the

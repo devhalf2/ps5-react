@@ -86,7 +86,9 @@ physical px = round(logical px × render.width / baseWidth)
 `w-screen`, `h-screen`, `min-w-screen`, `max-w-screen`, `min-h-screen`, and
 `max-h-screen` use the exact render width or height. Unitless values (opacity,
 z-index, flex, scale, rotation, aspect ratio, relative line height and tracking)
-are not scaled. Pixel `tracking-[…]` values are scaled but kept to two decimals.
+are not scaled. Pixel `tracking-[…]` values are scaled but kept to two decimals; the engine keeps
+letter spacing in 1/64 px, so a fraction of a render pixel adds up along the line rather than
+rounding away.
 
 Every font size is a literal in the bundle, so the font baker finds `text-*`
 sizes automatically; they no longer need to be listed in `assets.config.js`.
@@ -263,6 +265,14 @@ A later `leading-*` overrides the line height that `text-*` sets.
 Letter spacing: `tracking-tighter` -0.05em, `tight` -0.025em, `normal` 0,
 `wide` 0.025em, `wider` 0.05em, `widest` 0.1em, `tracking-[0.1em]` (relative),
 `tracking-[2px]` or `[0.1rem]` (fixed).
+
+`theme.fontTracking` sets a face's own spacing per render size, for matching another renderer's
+text: the family name as baked (the font file's name) → render px font size → render px a glyph.
+It applies where a class list (or a variant) sets that face or size and no `tracking-*`:
+
+```js
+export default {theme: {extend: {fontTracking: {'SST-Medium': {23: 0.34, 30: -0.21}}}}};
+```
 
 Relative line heights and letter spacing need a `text-*` size on the same
 element (in the same `className`, or the static part of it for conditional and

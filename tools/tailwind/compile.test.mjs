@@ -166,6 +166,25 @@ test('theme overrides replace a scale; extend deep-merges into it', () => {
   assert.throws(() => compiler({theme: {screens: {}}}), /unsupported theme key "screens"/);
 });
 
+test('theme.fontTracking spaces a face at a size unless the class list sets tracking', () => {
+  const config = {theme: {extend: {
+    fontFamily: {display: './fonts/Display.ttf', body: './fonts/Body.ttf'},
+    fontTracking: {Display: {23: 0.34, 30: -0.21}, Body: {18: -0.09}},
+  }}};
+  assert.deepEqual(style('font-display text-[15.6px]', config, 1920), {fontFamily: 'Display', fontSize: 23, letterSpacing: 0.34});
+  assert.deepEqual(style('font-display text-[20px]', config, 1920), {fontFamily: 'Display', fontSize: 30, letterSpacing: -0.21});
+  // A size the table leaves out, a face it does not name, and an explicit tracking-* all stay as they are.
+  assert.deepEqual(style('font-display text-[16px]', config, 1920), {fontFamily: 'Display', fontSize: 24});
+  assert.deepEqual(style('font-body text-[15.6px]', config, 1920), {fontFamily: 'Body', fontSize: 23});
+  assert.deepEqual(style('font-display text-[15.6px] tracking-[1px]', config, 1920),
+    {fontFamily: 'Display', fontSize: 23, letterSpacing: 1.5});
+  // A variant that changes the face takes that face's spacing at the base size.
+  const c = compiler(config, 1920);
+  const {base, variants} = c.parse('font-body text-[12px] focused:font-display focused:text-[15.6px]');
+  assert.deepEqual(c.finalize(base, base), {fontFamily: 'Body', fontSize: 18, letterSpacing: -0.09});
+  assert.deepEqual(c.finalize(variants[0].fragment, base), {fontFamily: 'Display', fontSize: 23, letterSpacing: 0.34});
+});
+
 test('variants group by prop set and compose with the base', () => {
   const c = compiler();
   const {base, variants} = c.parse(

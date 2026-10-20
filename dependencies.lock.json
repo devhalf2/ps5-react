@@ -29,7 +29,8 @@
       "patches/embeddedReact-text-direction.patch",
       "patches/embeddedReact-text-clip.patch",
       "patches/embeddedReact-font-gamma.patch",
-      "patches/embeddedReact-fade-cache-scope.patch"
+      "patches/embeddedReact-fade-cache-scope.patch",
+      "patches/embeddedReact-subpixel-letter-spacing.patch"
     ]
   },
   "platform": {

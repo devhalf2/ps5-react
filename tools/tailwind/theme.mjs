@@ -34,6 +34,9 @@ export const defaultTheme = {
   },
   // Multiples of the font size (em).
   letterSpacing: {tighter: -0.05, tight: -0.025, normal: 0, wide: 0.025, wider: 0.05, widest: 0.1},
+  // A face's own spacing correction: family name (as baked) → render px size → px a glyph, applied
+  // where a class list sets that face or size and no tracking-* of its own. Empty by default.
+  fontTracking: {},
   borderRadius: {none: 0, sm: 2, DEFAULT: 4, md: 6, lg: 8, xl: 12, '2xl': 16, '3xl': 24, full: 9999},
   borderWidth: {DEFAULT: 1, 0: 0, 2: 2, 4: 4, 8: 8},
   opacity: Object.fromEntries(Array.from({length: 21}, (_, i) => [i * 5, i / 20])),

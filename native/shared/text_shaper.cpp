@@ -362,7 +362,7 @@ enum : std::uint8_t { kClusterStart = 1, kBreakBefore = 2, kSpace = 4, kNewline 
 
 struct Layout {
   std::string text, family;
-  int px = 0, letter_spacing = 0, bold = 0, direction = 0;
+  int px = 0, letter_spacing = 0, bold = 0, direction = 0;  // letter_spacing in 1/64 px, as the engine's
   unsigned serial = 0;
   const BitmapFont* baked = nullptr;
   std::vector<Glyph> glyphs;
@@ -452,8 +452,8 @@ void shape(Layout& layout) {
           layout.glyphs.push_back({cp, 0, 0, 0, cluster, -1});
           continue;
         }
-        const int advance = font_glyph(layout.baked, cp)->advance + layout.letter_spacing + layout.bold;
-        layout.glyphs.push_back({cp, advance * 64, 0, 0, cluster, -1});
+        const int advance = (font_glyph(layout.baked, cp)->advance + layout.bold) * 64 + layout.letter_spacing;
+        layout.glyphs.push_back({cp, advance, 0, 0, cluster, -1});
       }
     } else {
       hb_buffer_t* buffer = state->buffer;
@@ -466,7 +466,7 @@ void shape(Layout& layout) {
       unsigned count = 0;
       const hb_glyph_info_t* info = hb_buffer_get_glyph_infos(buffer, &count);
       const hb_glyph_position_t* position = hb_buffer_get_glyph_positions(buffer, nullptr);
-      const int extra = kFaces[run.face].joined ? 0 : (layout.letter_spacing + layout.bold) * 64;
+      const int extra = kFaces[run.face].joined ? 0 : layout.letter_spacing + layout.bold * 64;
       for (unsigned i = 0; i < count; i++) {
         const bool first_of_cluster = i == 0 || info[i].cluster != info[i - 1].cluster;
         layout.glyphs.push_back({info[i].codepoint, position[i].x_advance + (first_of_cluster ? extra : 0),
@@ -694,7 +694,8 @@ void render(const ERTextRenderParams* params, const char* text, const std::uint8
   const bool ellipsis = truncated && params->ellipsize_mode != ER_TEXT_ELLIPSIZE_CLIP;
   const std::uint32_t ellipsis_cp = baked_has(layout.baked, 0x2026) ? 0x2026 : '.';
   const int ellipsis_count = ellipsis_cp == 0x2026 ? 1 : 3;
-  const int ellipsis_w = ellipsis_count * (font_glyph(layout.baked, ellipsis_cp)->advance + layout.letter_spacing + layout.bold);
+  const std::int32_t ellipsis_advance = (font_glyph(layout.baked, ellipsis_cp)->advance + layout.bold) * 64 + layout.letter_spacing;
+  const int ellipsis_w = to_px(ellipsis_count * ellipsis_advance);
 
   for (std::size_t i = 0; i < lines.size(); i++) {
     const int line_top = clip.y + static_cast<int>(i) * line_height;
@@ -733,7 +734,7 @@ void render(const ERTextRenderParams* params, const char* text, const std::uint8
     auto draw_ellipsis = [&](std::int32_t& pen) {
       for (int k = 0; k < ellipsis_count; k++) {
         draw_glyph(layout, Glyph{ellipsis_cp, 0, 0, 0, 0, -1}, (pen + 32) >> 6, line_top, clip, base);
-        pen += (font_glyph(layout.baked, ellipsis_cp)->advance + layout.letter_spacing + layout.bold) * 64;
+        pen += ellipsis_advance;
       }
     };
     std::int32_t pen = x * 64;

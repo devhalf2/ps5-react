@@ -1,0 +1,463 @@
+Embedded React: letter spacing in 1/64 px, with 26.6 advances on the bitmap text path.
+
+Modified from Embedded React (Apache-2.0, Copyright 2026 Cory Lamming) at the
+revision pinned in dependencies.lock.json, after the patches listed before this
+one there. Changed files: bridges/quickjs/native_ui_bridge.c,
+engine/include/er_scene.h, engine/text/text_renderer.c,
+engine/text/text_renderer.h and engine/tests/text/test_text.c. Not yet proposed
+upstream.
+
+letterSpacing was rounded to whole pixels at the bridge, so a fraction of a
+pixel (the 0.2-0.4 px a glyph that separates a font's spacing from the PS5's
+own at some sizes) could not be set at all. The bridge now keeps JS
+letterSpacing in 1/64 px (int16, clamped, never the inherit sentinel), and the
+bitmap text path runs its advances, pens and widths in 26.6 fixed point: each
+glyph is drawn at its pen rounded to the nearest pixel, and a width leaves the
+text code rounded up so a box fits its text. With no letter spacing every
+advance is a whole number of pixels, so text draws and measures exactly as
+before.
+
+diff --git a/bridges/quickjs/native_ui_bridge.c b/bridges/quickjs/native_ui_bridge.c
+index 9a7a18c..909ee38 100644
+--- a/bridges/quickjs/native_ui_bridge.c
++++ b/bridges/quickjs/native_ui_bridge.c
+@@ -378,6 +378,38 @@ static bool to_dim(JSContext* ctx, JSValueConst v, int16_t* out)
+     return true;
+ }
+ 
++/**
++ * @brief Coerces a numeric JS letterSpacing (pixels, fractions allowed) to 1/64 px.
++ *
++ * Text advances run in 26.6 fixed point, so a fraction of a pixel of spacing adds up along a line.
++ * The result is clamped to int16 and never equals the INT16_MIN inherit sentinel.
++ *
++ * @param[in]  ctx  QuickJS context.
++ * @param[in]  v    JS value (expected numeric).
++ * @param[out] out  Receives the spacing in 1/64 px.
++ *
++ * @return true on a numeric value.
++ */
++static bool to_letter_spacing(JSContext* ctx, JSValueConst v, int16_t* out)
++{
++    if (!JS_IsNumber(v))
++    {
++        return false;
++    }
++    double d = 0.0;
++    if (JS_ToFloat64(ctx, &d, v) != 0 || d != d)
++    {
++        return false;
++    }
++    d = round(d * 64.0);
++    if (d > 32767.0)
++        d = 32767.0;
++    if (d < -32767.0)
++        d = -32767.0;
++    *out = (int16_t)d;
++    return true;
++}
++
+ /**
+  * @brief Maps a single hex character to its 0–15 value.
+  *
+@@ -2408,7 +2440,14 @@ static void apply_props(JSContext* ctx, ERNode* node, JSValueConst obj)
+     ER_U8(PROP_NUMBER_OF_LINES, number_of_lines);
+     ER_ENUM(PROP_ELLIPSIZE_MODE, ellipsize_mode, map_ellipsize);
+     ER_DIM(PROP_LINE_HEIGHT, line_height);
+-    ER_DIM(PROP_LETTER_SPACING, letter_spacing);
++    {
++        JSValueConst _v = s_prop_slots[PROP_LETTER_SPACING];
++        int16_t _ls;
++        if (!JS_IsUndefined(_v) && to_letter_spacing(ctx, _v, &_ls))
++        {
++            p.letter_spacing = _ls;
++        }
++    }
+ 
+     /* Image. */
+     ER_STR(PROP_IMAGE_NAME, image_name, ER_IMAGE_NAME_MAX);
+@@ -3641,10 +3680,10 @@ ER_BRIDGE_MARSHAL_FN(js_set_text_spans)
+         }
+         if (prop_get(ctx, seg, "letterSpacing", &v))
+         {
+-            int32_t ls = 0;
+-            if (JS_ToInt32(ctx, &ls, v) == 0)
++            int16_t ls = 0;
++            if (to_letter_spacing(ctx, v, &ls))
+             {
+-                sp->letter_spacing = (int16_t)ls;
++                sp->letter_spacing = ls;
+             }
+             JS_FreeValue(ctx, v);
+         }
+diff --git a/engine/include/er_scene.h b/engine/include/er_scene.h
+index b7514f4..f6fa124 100644
+--- a/engine/include/er_scene.h
++++ b/engine/include/er_scene.h
+@@ -640,7 +640,7 @@ extern "C"
+         uint8_t font_weight;             /**< 0 = normal, 1 = bold, 0xFF = inherit. */
+         uint8_t font_style;              /**< ERFontStyle; 0xFF = inherit. */
+         uint8_t text_decoration;         /**< ERTextDecoration; 0xFF = inherit. */
+-        int16_t letter_spacing;          /**< Extra pixels per glyph advance; ER_LAYOUT_AUTO = inherit. */
++        int16_t letter_spacing;          /**< Extra 1/64 px per glyph advance; ER_LAYOUT_AUTO = inherit. */
+     } ERTextSpan;
+ 
+     /**
+@@ -755,7 +755,7 @@ extern "C"
+         uint8_t ellipsize_mode;                   /**< ERTextEllipsize — used when number_of_lines truncates. */
+         uint8_t text_decoration;                  /**< ERTextDecoration — default none. */
+         int16_t line_height;                      /**< Line height in pixels; 0 = use font default. */
+-        int16_t letter_spacing;                   /**< Extra pixels added to each glyph advance; may be negative. */
++        int16_t letter_spacing;                   /**< Extra 1/64 px added to each glyph advance (JS letterSpacing * 64); may be negative. */
+         uint8_t span_count;                       /**< 0 = use text[]; >0 = render using spans[] instead. */
+         ERTextSpan spans[ER_TEXT_MAX_SPANS];      /**< Per-span style overrides; active when span_count > 0. */
+ 
+diff --git a/engine/tests/text/test_text.c b/engine/tests/text/test_text.c
+index e5d5aed..a7309fb 100644
+--- a/engine/tests/text/test_text.c
++++ b/engine/tests/text/test_text.c
+@@ -175,7 +175,7 @@ static int fail(const char* msg)
+  * Verifies:
+  *   - Basic measurement returns positive dimensions.
+  *   - A longer string measures wider; line heights are consistent.
+- *   - letter_spacing widens measurement proportionally.
++ *   - letter_spacing (1/64 px) widens measurement proportionally, fractions included.
+  *   - UTF-8 multi-byte sequences are measured correctly.
+  *   - Rendering produces in-bounds draw calls.
+  *   - A narrow clip rect produces no out-of-bounds fills.
+@@ -206,9 +206,14 @@ int main(void)
+     /* letter_spacing widens a non-empty string. */
+     int w_nols = 0, w_ls = 0, dummy = 0;
+     er_text_measure("Hello", 14, NULL, 0, 0, &w_nols, &dummy);
+-    er_text_measure("Hello", 14, NULL, 2, 0, &w_ls, &dummy);
++    er_text_measure("Hello", 14, NULL, 2 * 64, 0, &w_ls, &dummy);
+     if (w_ls <= w_nols)
+-        return fail("letter_spacing=2 did not produce wider measure");
++        return fail("letter_spacing=2px did not produce wider measure");
++    /* letter_spacing is in 1/64 px: half a pixel on each of five glyphs adds 2.5 px, rounded up. */
++    int w_half = 0;
++    er_text_measure("Hello", 14, NULL, 32, 0, &w_half, &dummy);
++    if (w_half != w_nols + 3)
++        return fail("letter_spacing=0.5px did not add 2.5 px rounded up");
+ 
+     /* Bold measures wider than normal: the synthetic faux-bold adds 1px per glyph, which the
+        renderer applies to the cursor advance.  "Hello" (5 glyphs) must measure exactly +5. */
+@@ -391,7 +396,7 @@ int main(void)
+     par.clip = (ERRect){10, 5, 200, 40};
+     par.color = 0xFFFFFFFFU;
+     par.font_size = 14;
+-    par.letter_spacing = 4;
++    par.letter_spacing = 4 * 64;
+     er_text_render(&par);
+     if (tc.out_of_bounds != 0)
+         return fail("letter_spacing render emitted out-of-bounds pixels");
+diff --git a/engine/text/text_renderer.c b/engine/text/text_renderer.c
+index a0d45f5..3d2e4b0 100644
+--- a/engine/text/text_renderer.c
++++ b/engine/text/text_renderer.c
+@@ -48,9 +48,16 @@ typedef struct
+ {
+     const char* start; /**< Pointer to first byte of this line in the source string. */
+     int byte_len;      /**< Number of bytes in this line (trailing whitespace excluded). */
+-    int px_width;      /**< Pixel width of this line (trailing whitespace excluded). */
++    int fx_width;      /**< Width of this line in 1/64 px (trailing whitespace excluded). */
+ } LineSpan;
+ 
++/* Advances, pens and widths run in 26.6 fixed point (1/64 px), as letter_spacing does, so a fraction
++ * of a pixel of spacing adds up along a line instead of rounding away per glyph. A glyph is drawn at its
++ * pen rounded to the nearest pixel; a width leaves the text code rounded up, so a box fits its text. */
++#define FX_ONE 64
++#define FX_ROUND(v) (((v) + 32) >> 6)
++#define FX_CEIL(v) (((v) + 63) >> 6)
++
+ /*----------------------------------------------------------------------------------------------------------------------
+  - Variables: Private
+  ---------------------------------------------------------------------------------------------------------------------*/
+@@ -133,17 +140,17 @@ static uint32_t utf8_next(const char** pp)
+ }
+ 
+ /**
+- * @brief Returns the pixel advance for a codepoint including letter_spacing.
++ * @brief Returns the 26.6 advance for a codepoint including letter_spacing.
+  *
+  * @param[in] font          BitmapFont to look up the glyph in.
+  * @param[in] cp            Unicode codepoint.
+- * @param[in] letter_spacing Extra pixels added to the glyph's natural advance.
++ * @param[in] letter_spacing Extra 1/64 px added to the glyph's natural advance.
+  *
+- * @return Total cursor advance in pixels.
++ * @return Total cursor advance in 1/64 px.
+  */
+ static int glyph_adv(const BitmapFont* font, uint32_t cp, int letter_spacing)
+ {
+-    return (int)font_glyph(font, cp)->advance + letter_spacing;
++    return (int)font_glyph(font, cp)->advance * FX_ONE + letter_spacing;
+ }
+ 
+ /**
+@@ -392,7 +399,7 @@ static void draw_cp(
+  * @param[in]  text           Null-terminated UTF-8 source string.
+  * @param[in]  font           BitmapFont used to measure glyph advances.
+  * @param[in]  max_w          Maximum pixel width per line; 0 = no horizontal limit.
+- * @param[in]  letter_spacing Extra pixels added to each glyph advance.
++ * @param[in]  letter_spacing Extra 1/64 px added to each glyph advance.
+  * @param[in]  max_lines      Maximum lines to produce; 0 = unlimited.
+  * @param[out] out            Caller-provided array to receive the line spans.
+  * @param[in]  cap            Capacity of out[].
+@@ -496,7 +503,7 @@ static int break_lines(const char* text,
+             uint32_t cp = utf8_next(&p);
+             const int adv = glyph_adv(font, cp, letter_spacing);
+ 
+-            if (max_w > 0 && line_w + adv > max_w && cp_start > line_start)
++            if (max_w > 0 && line_w + adv > max_w * FX_ONE && cp_start > line_start)
+             {
+                 if (saw_ws)
+                 {
+@@ -547,8 +554,9 @@ void er_text_render(const ERTextRenderParams* params)
+         return;
+ 
+     const int lh = (params->line_height > 0) ? (int)params->line_height : (int)font->line_height;
+-    const int ls = (int)params->letter_spacing;
++    const int ls = (int)params->letter_spacing; /* 1/64 px */
+     const bool bold = (params->font_weight != 0U);
++    const int bold_fx = bold ? FX_ONE : 0;
+     const bool italic = (params->font_style != 0U);
+ 
+     /* ---- Span mode: merge all span texts into one buffer for line-breaking. ---- */
+@@ -592,14 +600,14 @@ void er_text_render(const ERTextRenderParams* params)
+      * breaking at the regular advance let a bold line overrun the box by a pixel per glyph. */
+     LineSpan lines[TEXT_MAX_LINES];
+     bool truncated = false;
+-    const int n_lines = break_lines(render_src, font, params->clip.w, ls + (bold ? 1 : 0),
++    const int n_lines = break_lines(render_src, font, params->clip.w, ls + bold_fx,
+                                     (int)params->number_of_lines, lines, TEXT_MAX_LINES, &truncated);
+     if (n_lines == 0)
+         return;
+ 
+     /* ---- Pre-compute ellipsis glyph for TAIL mode. ---- */
+     const bool do_ellipsis = truncated && (params->ellipsize_mode != ER_TEXT_ELLIPSIZE_CLIP);
+-    int ellipsis_px = 0;
++    int ellipsis_fx = 0;
+     uint32_t ellipsis_cp = 0;
+     const GlyphInfo* ellipsis_g = NULL;
+ 
+@@ -608,7 +616,7 @@ void er_text_render(const ERTextRenderParams* params)
+         const char* ep = ELLIPSIS_UTF8;
+         ellipsis_cp = utf8_next(&ep);
+         ellipsis_g = font_glyph(font, ellipsis_cp);
+-        ellipsis_px = (int)ellipsis_g->advance + ls + (bold ? 1 : 0);
++        ellipsis_fx = (int)ellipsis_g->advance * FX_ONE + ls + bold_fx;
+     }
+ 
+     /* The bitmap path draws left to right; only an explicitly right-to-left paragraph flips START/END. */
+@@ -626,11 +634,11 @@ void er_text_render(const ERTextRenderParams* params)
+ 
+         /* Determine the visible text range; shorten for ellipsis. */
+         const char* render_end = lines[i].start + lines[i].byte_len;
+-        int render_w = lines[i].px_width;
++        int render_w = lines[i].fx_width;
+ 
+         if (apply_ellip)
+         {
+-            const int avail = params->clip.w - ellipsis_px;
++            const int avail = params->clip.w * FX_ONE - ellipsis_fx;
+             const char* p = lines[i].start;
+             const char* cut = p;
+             int w = 0;
+@@ -638,7 +646,7 @@ void er_text_render(const ERTextRenderParams* params)
+             {
+                 const char* cps = p;
+                 uint32_t cp = utf8_next(&p);
+-                const int adv = glyph_adv(font, cp, ls) + (bold ? 1 : 0);
++                const int adv = glyph_adv(font, cp, ls) + bold_fx;
+                 if (w + adv > avail)
+                 {
+                     p = cps;
+@@ -659,12 +667,12 @@ void er_text_render(const ERTextRenderParams* params)
+         }
+         else if (align == ER_TEXT_ALIGN_CENTER)
+         {
+-            const int off = (params->clip.w - lines[i].px_width) / 2;
++            const int off = (params->clip.w - FX_CEIL(lines[i].fx_width)) / 2;
+             cursor_x = params->clip.x + (off > 0 ? off : 0);
+         }
+         else /* ER_TEXT_ALIGN_RIGHT */
+         {
+-            const int off = params->clip.w - lines[i].px_width;
++            const int off = params->clip.w - FX_CEIL(lines[i].fx_width);
+             cursor_x = params->clip.x + (off > 0 ? off : 0);
+         }
+ 
+@@ -672,7 +680,7 @@ void er_text_render(const ERTextRenderParams* params)
+         {
+             /* ---- Span-aware rendering: group consecutive chars of the same span. ---- */
+             const char* p = lines[i].start;
+-            int cx = cursor_x;
++            int cx = cursor_x * FX_ONE;
+ 
+             while (p < render_end && *p)
+             {
+@@ -696,26 +704,27 @@ void er_text_render(const ERTextRenderParams* params)
+                     if (span_map[cur_off] != si)
+                         break;
+                     uint32_t cp = utf8_next(&p);
+-                    draw_cp(font, cp, cx, cursor_y, &params->clip, seg_color, seg_italic);
++                    draw_cp(font, cp, FX_ROUND(cx), cursor_y, &params->clip, seg_color, seg_italic);
+                     if (seg_bold)
+-                        draw_cp(font, cp, cx + 1, cursor_y, &params->clip, seg_color, seg_italic);
+-                    cx += glyph_adv(font, cp, seg_ls) + (seg_bold ? 1 : 0);
++                        draw_cp(font, cp, FX_ROUND(cx) + 1, cursor_y, &params->clip, seg_color, seg_italic);
++                    cx += glyph_adv(font, cp, seg_ls) + (seg_bold ? FX_ONE : 0);
+                 }
+ 
+                 /* Text decoration for this span segment. */
+                 if (seg_deco != ER_TEXT_DECORATION_NONE)
+                 {
+-                    int dec_w = cx - seg_start_cx;
++                    const int dec_x = FX_ROUND(seg_start_cx);
++                    int dec_w = FX_ROUND(cx) - dec_x;
+                     const int right_edge = params->clip.x + params->clip.w;
+-                    if (seg_start_cx + dec_w > right_edge)
+-                        dec_w = right_edge - seg_start_cx;
++                    if (dec_x + dec_w > right_edge)
++                        dec_w = right_edge - dec_x;
+                     if (dec_w > 0)
+                     {
+                         const int dec_y = (seg_deco == ER_TEXT_DECORATION_UNDERLINE)
+                                               ? cursor_y + (int)font->baseline + 1
+                                               : cursor_y + (int)font->baseline * 2 / 3;
+                         if (dec_y >= params->clip.y && dec_y < params->clip.y + params->clip.h)
+-                            er_blit_fill(seg_color, seg_start_cx, dec_y, dec_w, 1);
++                            er_blit_fill(seg_color, dec_x, dec_y, dec_w, 1);
+                     }
+                 }
+             }
+@@ -723,9 +732,9 @@ void er_text_render(const ERTextRenderParams* params)
+             /* Ellipsis glyph uses parent style. */
+             if (apply_ellip && ellipsis_g)
+             {
+-                draw_cp(font, ellipsis_cp, cx, cursor_y, &params->clip, params->color, italic);
++                draw_cp(font, ellipsis_cp, FX_ROUND(cx), cursor_y, &params->clip, params->color, italic);
+                 if (bold)
+-                    draw_cp(font, ellipsis_cp, cx + 1, cursor_y, &params->clip, params->color, italic);
++                    draw_cp(font, ellipsis_cp, FX_ROUND(cx) + 1, cursor_y, &params->clip, params->color, italic);
+             }
+         }
+         else
+@@ -733,20 +742,20 @@ void er_text_render(const ERTextRenderParams* params)
+             /* ---- Single-run path (unchanged). ---- */
+             {
+                 const char* p = lines[i].start;
+-                int cx = cursor_x;
++                int cx = cursor_x * FX_ONE;
+                 while (p < render_end && *p)
+                 {
+                     uint32_t cp = utf8_next(&p);
+-                    draw_cp(font, cp, cx, cursor_y, &params->clip, params->color, italic);
++                    draw_cp(font, cp, FX_ROUND(cx), cursor_y, &params->clip, params->color, italic);
+                     if (bold)
+-                        draw_cp(font, cp, cx + 1, cursor_y, &params->clip, params->color, italic);
+-                    cx += glyph_adv(font, cp, ls) + (bold ? 1 : 0);
++                        draw_cp(font, cp, FX_ROUND(cx) + 1, cursor_y, &params->clip, params->color, italic);
++                    cx += glyph_adv(font, cp, ls) + bold_fx;
+                 }
+             }
+ 
+             if (apply_ellip && ellipsis_g)
+             {
+-                const int ecx = cursor_x + render_w;
++                const int ecx = cursor_x + FX_ROUND(render_w);
+                 draw_cp(font, ellipsis_cp, ecx, cursor_y, &params->clip, params->color, italic);
+                 if (bold)
+                     draw_cp(font, ellipsis_cp, ecx + 1, cursor_y, &params->clip, params->color, italic);
+@@ -754,7 +763,7 @@ void er_text_render(const ERTextRenderParams* params)
+ 
+             if (params->text_decoration != ER_TEXT_DECORATION_NONE)
+             {
+-                int dec_w = apply_ellip ? (render_w + ellipsis_px) : lines[i].px_width;
++                int dec_w = FX_CEIL(apply_ellip ? (render_w + ellipsis_fx) : lines[i].fx_width);
+                 const int right_edge = params->clip.x + params->clip.w;
+                 if (cursor_x + dec_w > right_edge)
+                     dec_w = right_edge - cursor_x;
+@@ -809,8 +818,8 @@ void er_text_measure(const char* text,
+ 
+     /* Bold is synthesised by drawing each glyph twice 1px apart, which the renderer accounts for
+        in the cursor advance (+1px/glyph).  Measure the same way so the box fits the drawn text. */
+-    const int bold_extra = (font_weight != 0U) ? 1 : 0;
+-    long width = 0;
++    const int bold_extra = (font_weight != 0U) ? FX_ONE : 0;
++    long width = 0; /* 1/64 px */
+     if (text)
+     {
+         const char* p = text;
+@@ -822,6 +831,7 @@ void er_text_measure(const char* text,
+             width += glyph_adv(font, cp, (int)letter_spacing) + bold_extra;
+         }
+     }
++    width = width > 0 ? FX_CEIL(width) : 0;
+     if (width > INT_MAX)
+         width = INT_MAX;
+ 
+@@ -882,7 +892,7 @@ void er_text_measure_spans(const ERTextSpan* spans,
+         /* Resolve per-span style from sentinels exactly as the renderer does. */
+         const bool seg_bold = (sp->font_weight == 0xFFU) ? base_bold : (sp->font_weight != 0U);
+         const int seg_ls = (sp->letter_spacing == ER_LAYOUT_AUTO) ? (int)base_letter_spacing : (int)sp->letter_spacing;
+-        const int bold_extra = seg_bold ? 1 : 0;
++        const int bold_extra = seg_bold ? FX_ONE : 0;
+ 
+         const char* p = sp->text;
+         while (*p)
+@@ -893,6 +903,7 @@ void er_text_measure_spans(const ERTextSpan* spans,
+             width += glyph_adv(font, cp, seg_ls) + bold_extra;
+         }
+     }
++    width = width > 0 ? FX_CEIL(width) : 0;
+     if (width > INT_MAX)
+         width = INT_MAX;
+ 
+@@ -941,11 +952,11 @@ int er_text_wrap(const char* text,
+ 
+     LineSpan lines[TEXT_MAX_LINES];
+     bool truncated = false;
+-    const int n = break_lines(src, font, max_w, (int)letter_spacing + (font_weight != 0U ? 1 : 0), max_lines, lines,
++    const int n = break_lines(src, font, max_w, (int)letter_spacing + (font_weight != 0U ? FX_ONE : 0), max_lines, lines,
+                               TEXT_MAX_LINES, &truncated);
+     for (int i = 0; i < n; i++)
+-        if (lines[i].px_width > *out_width)
+-            *out_width = lines[i].px_width;
++        if (FX_CEIL(lines[i].fx_width) > *out_width)
++            *out_width = FX_CEIL(lines[i].fx_width);
+     return n > 0 ? n : 1;
+ }
+ 
+diff --git a/engine/text/text_renderer.h b/engine/text/text_renderer.h
+index a79d05d..4d9eac8 100644
+--- a/engine/text/text_renderer.h
++++ b/engine/text/text_renderer.h
+@@ -84,7 +84,7 @@ typedef struct ERTextRenderParams
+     uint8_t font_weight;     /**< 0 = normal, 1 = bold (synthetic double-pass). */
+     uint8_t font_style;      /**< ERFontStyle — 0 = normal, 1 = italic (synthetic shear). */
+     int16_t line_height;     /**< Line height in pixels; 0 = use the font's natural value. */
+-    int16_t letter_spacing;  /**< Extra pixels added to each glyph advance; may be negative. */
++    int16_t letter_spacing;  /**< Extra 1/64 px added to each glyph advance; may be negative. */
+     uint8_t span_count;      /**< 0 = use text; >0 = render using spans[] instead. */
+     const ERTextSpan* spans; /**< Span array; NULL or ignored when span_count == 0. */
+ } ERTextRenderParams;
+@@ -114,7 +114,7 @@ void er_text_render(const ERTextRenderParams* params);
+  * @param[in]  text           Null-terminated UTF-8 string to measure.
+  * @param[in]  font_size      Desired font size in pixels (clamped to [8, 96]).
+  * @param[in]  font_family    Font family name, or NULL for the built-in default.
+- * @param[in]  letter_spacing Extra pixels per glyph advance (same as ERTextRenderParams).
++ * @param[in]  letter_spacing Extra 1/64 px per glyph advance (same as ERTextRenderParams).
+  * @param[in]  font_weight    0 = normal; non-zero = bold (adds the faux-bold +1px/glyph the
+  *                            renderer applies, so the measured width matches what is drawn).
+  * @param[out] out_width      Receives the measured width in pixels.
+@@ -162,7 +162,7 @@ void er_text_measure_spans(const ERTextSpan* spans,
+  * @param[in]  span_count      Number of spans; 0 measures `text`.
+  * @param[in]  font_size       Font size in pixels (clamped to [8, 96]).
+  * @param[in]  font_family     Font family name, or NULL for the built-in default.
+- * @param[in]  letter_spacing  Extra pixels per glyph advance.
++ * @param[in]  letter_spacing  Extra 1/64 px per glyph advance.
+  * @param[in]  font_weight     0 = normal; non-zero = faux bold, a pixel wider per glyph, as drawn.
+  * @param[in]  max_w           Line width in pixels; 0 breaks only at newlines.
+  * @param[in]  max_lines       Most lines kept, as numberOfLines; 0 = unlimited.

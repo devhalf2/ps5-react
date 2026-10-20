@@ -112,6 +112,12 @@ not yet proposed upstream) adds a per-font coverage `gamma` to baked fonts.
 `embeddedReact-fade-cache-scope.patch` (Apache-2.0 compositor and test; not yet
 proposed upstream) drops the fade cache's copy only for a change inside the
 cached group, and keeps a smaller group from evicting a larger one mid-fade.
+`embeddedReact-subpixel-letter-spacing.patch` (Apache-2.0 bridge, scene and
+text headers, bitmap text renderer and its test; not yet proposed upstream)
+keeps `letterSpacing` in 1/64 px and runs the bitmap text path's advances,
+pens and widths in 26.6 fixed point, so a fraction of a pixel of spacing adds
+up along a line. ps5-react's shaper (`native/shared/text_shaper.cpp`) reads the
+same unit.
 Patches apply in the order the lock lists them, and may add files.
 
 `tools/bundle.mjs` adapts upstream Apache-2.0 tooling and preserves its notice.
