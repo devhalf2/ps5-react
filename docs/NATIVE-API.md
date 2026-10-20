@@ -17,7 +17,7 @@ Controller.setLightBar('#38bdf8');
 ## Contract
 
 The modules in `runtime/js/native.js` wrap `globalThis.__ps5ReactNative`, which
-each host installs before the bundle runs. Its exact shape (ABI v5) is
+each host installs before the bundle runs. Its exact shape (ABI v10) is
 documented in [`native/shared/host_api.hpp`](../native/shared/host_api.hpp).
 `native/shared/host_api.cpp` implements the filesystem with POSIX and the object
 itself; `native/ps5/` and `native/desktop/` implement the platform functions.
@@ -495,6 +495,22 @@ error, so a first volume can be refused before the remaining volumes download.
 An empty kind is not proof of anything; image kinds are recognized by superblock
 magic only, not validated as mountable.
 
+
+## Shaders (ABI v10)
+
+`ShaderView` and `BootIntro` ([SHADERS.md](SHADERS.md)) use
+`__ps5ReactNative.shader`; apps use the components, not the namespace.
+
+| Call | Notes |
+| --- | --- |
+| `shader.create(source)` | Layer ID for GLSL 4.10 core fragment source (a missing `#version` line is added); compiled when the presenter first draws it. At most 8 layers and 64 KB of source. |
+| `shader.update(id, options)` | `{x, y, width, height}` in framebuffer pixels, `opacity` 0–1, `resolutionScale` 0.05–1, `uniforms` `{name: number \| [2–4 numbers]}` (at most 16). All optional; a bad option throws and changes nothing. |
+| `shader.destroy(id)` | Deletes the layer; its GL objects go on the next frame. |
+| `shader.error(id)` | The GLSL info log of a failed compile or link, else `null`. |
+
+Errors name the call and the layer: `shader.update 3: resolutionScale must be 0.05 to 1`.
+Both hosts implement it in `native/shared/shader_layers.cpp`, with the same GL. The desktop
+self-test compiles a layer and reads back its pixels; not yet confirmed on hardware.
 
 ## Browser download capture (ABI v7)
 

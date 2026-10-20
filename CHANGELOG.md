@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased — GPU shader layers
+
+- `ShaderView` in `@ps5-react/core`: a GLSL 4.10 core fragment shader drawn on the GPU in a View's laid-out
+  rect, composited in z-order with the CPU-rasterized UI (children and later UI show above it). The engine
+  sets `uTime`, `uResolution`, `uRect` and `uOpacity` every frame, so animation needs no JavaScript and no CPU
+  repaint; `uniforms` (numbers, vectors, color strings), `opacity` and `resolutionScale` update without
+  recompiling. A compile error logs the GLSL info log, reaches `onError`, and draws nothing. See
+  [docs/SHADERS.md](docs/SHADERS.md).
+- Native API ABI v10: `__ps5ReactNative.shader.create/update/destroy/error`, implemented once in
+  `native/shared/shader_layers.cpp` for both hosts; the presenter draws live layers, then the framebuffer
+  over them with premultiplied blending. Frames without a layer take the previous path.
+- Engine patch `embeddedReact-view-cutout.patch`: a View with `cutout` clears its rect to transparent through
+  a new optional backend callback, and the software backend's source-over composites alpha as well as color
+  (bit-identical over opaque pixels).
+- `BootIntro`: the PS5 boot sequence as an entrance. The logo is shown on black, followed by navy bokeh, a
+  burst of warm dust and a beam of light with drifting particles, then `children` cross over the scene. It
+  uses the timeline, colors and particle sizes and speeds measured from 1080p60 captures, at the console's
+  pace (`speed` scales it).
+- `apps/shader-lab` (PPSA99063) plays the intro and a particle `ShaderView` inside a panel.
+- The preview's `ps5_drive.py shot` reads the frame back from the GPU while shader layers draw; the desktop
+  self-test checks a layer's pixels through a cutout, a premultiplied blend over it, a uniform update and a
+  GLSL error. Not yet confirmed on hardware.
+
 ## Unreleased — console ID
 
 - `DeviceInfo.get().consoleId` (native API ABI v9): the console's OpenPSID from `sceKernelGetOpenPsId`,
