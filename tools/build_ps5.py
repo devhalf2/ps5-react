@@ -40,7 +40,8 @@ def main():
     parser.add_argument("--ui-reference", type=Path, default=DEPS / "platform")
     parser.add_argument("--embedded-react", type=Path, default=DEPS / "embeddedReact")
     parser.add_argument("--payload-sdk", type=Path, default=DEPS / "sdk/ps5-payload-sdk")
-    parser.add_argument("--llvm", type=Path, default=Path("/opt/homebrew/opt/llvm@18/bin"))
+    # PS5_LLVM points at an LLVM 18 installed elsewhere, such as a user-local Homebrew.
+    parser.add_argument("--llvm", type=Path, default=Path(os.environ.get("PS5_LLVM", "/opt/homebrew/opt/llvm@18/bin")))
     parser.add_argument("--opengl-archive", type=Path)
     args = parser.parse_args()
     app_dir = args.app_dir.resolve() if args.app_dir else ROOT / "apps" / args.app
