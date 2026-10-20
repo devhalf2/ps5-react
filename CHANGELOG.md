@@ -28,6 +28,10 @@
   lines, path and mode rules, SHA-256, the writer thread) moved from `rar_worker.cpp` to `worker_io.hpp`;
   the 7z extractor keeps the RAR one's modes (folders and programs 0755, other files 0644). The desktop
   worker links Homebrew's libarchive. From MyLuxy/overdrive adde740.
+- The `chinese-traditional` text font: Noto Sans TC 2.004, subset to Big5 level 1 (5,401 hanzi and its
+  symbols). Han characters take it first when the language is `zh-Hant` (or `zh` with region TW, HK or MO);
+  in other languages it comes after the simplified Chinese font and before the Japanese one. From
+  MyLuxy/overdrive 4d8388d (with Henianbin).
 
 ## Unreleased — tester fixes (Pandora 0.3.0)
 
