@@ -112,6 +112,18 @@ at 16 s. A first build that imported `libSceAppInstUtil` never reached `main`; t
 library is loaded by path. The in-app route (engine to loader on 127.0.0.1) is
 recorded separately once tested.
 
+## Pandora 0.3.0 tester log — 2026-10-20
+
+Pandora 0.3.0 (`PPSA99060`, game-store app, released engine before the tester
+fixes) on a tester's PS5. The tester reports firmware 2.xx (likely 2.60);
+the loader is unknown. The kernel log shows `sceKernelGetHwModelName` and
+`sceKernelGetOpenPsId` unavailable from `libkernel_sys.sprx`, so `consoleId`
+was `null`; the title ran. That build tried no other module or the
+`machdep.openpsid` sysctl. Whether the later fallbacks answer on that firmware
+is unconfirmed. The same log shows the render loop held 5.5–12 s in
+`archives.inspect` during a download, and a FileKeeper tunnel answering
+HTTP 503 with Retry-After: 60 after the download ramped to 64 connections.
+
 ## Not yet validated
 
 - `Power.keepAwake` (ABI v4, `sceSystemServicePowerTick` every 30 s): builds,
