@@ -1332,8 +1332,9 @@ void Service::log_stats(const Job& job, unsigned allowed, std::uint64_t& previou
   char line[320];
   std::snprintf(line, sizeof line,
     "download: conns=%u/%u paused=%u recv=%lluKB/s disk=%lluKB/s buffered=%zuKiB queued=%zu retries=%u write_max=%ums sync_max=%ums net_busy=%llu%% write_avg=%lluKiB mirrors=%zu splits=%u",
-    active, allowed, paused, static_cast<unsigned long long>((received-previous_received)/2048),
-    static_cast<unsigned long long>((written-previous_written)/2048), (block_count-free_blocks)*block_size/1024, queued,
+    // A failed range takes back the bytes it had accepted, so the totals can fall between two lines.
+    active, allowed, paused, static_cast<unsigned long long>(received > previous_received ? (received-previous_received)/2048 : 0),
+    static_cast<unsigned long long>(written > previous_written ? (written-previous_written)/2048 : 0), (block_count-free_blocks)*block_size/1024, queued,
     job.retries, write_max_us_.exchange(0)/1000, sync_max_us_.exchange(0)/1000,
     static_cast<unsigned long long>(perform_us_/20000), static_cast<unsigned long long>(average_write / 1024),
     static_cast<std::size_t>(std::count_if(job.mirrors.begin(), job.mirrors.end(), [](const std::string& url) { return !url.empty(); })),
