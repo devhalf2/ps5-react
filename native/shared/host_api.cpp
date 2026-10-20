@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Additional attribution term: see LICENSE-ATTRIBUTION.
 #include "host_api.hpp"
+#include "shader_layers.hpp"
 #include "removals.hpp"
 #include "text_shaper.hpp"
 
@@ -501,6 +502,7 @@ void ps5_react_install_host_api(JSContext* ctx) {
   JS_SetPropertyStr(ctx, api, "browser", ps5_react_browser_capture_api(ctx));
   JS_SetPropertyStr(ctx, api, "image", ps5_react_image_api(ctx));
   JS_SetPropertyStr(ctx, api, "sound", ps5_react_sound_api(ctx));
+  JS_SetPropertyStr(ctx, api, "shader", shader_layers::api(ctx));
   JSValue global = JS_GetGlobalObject(ctx);
   JS_SetPropertyStr(ctx, global, "__ps5ReactNative", api);
   JS_FreeValue(ctx, global);

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Additional attribution term: see LICENSE-ATTRIBUTION.
 #include "gl_presenter.hpp"
+#include "shader_layers.hpp"
 
 #ifdef __APPLE__
 #include <OpenGL/gl3.h>
@@ -236,6 +237,15 @@ bool GlPresenter::present(int sw, int sh) {
   glBindFramebuffer(GL_FRAMEBUFFER, 0);
   glDisable(GL_BLEND); glDisable(GL_DEPTH_TEST); glDisable(GL_SCISSOR_TEST);
   glDisable(GL_FRAMEBUFFER_SRGB);
+  const float scale = one_to_one(sw, sh) ? 1.0f : std::min(float(sw) / width_, float(sh) / height_);
+  const int vw = int(width_ * scale), vh = int(height_ * scale);
+  // Shader layers go under the framebuffer, which then blends over them with its premultiplied alpha:
+  // opaque UI covers them, a cutout shows them (docs/SHADERS.md).
+  if (shader_layers::active()) {
+    glViewport(0, 0, sw, sh);
+    glClearColor(0, 0, 0, 1); glClear(GL_COLOR_BUFFER_BIT);
+    shader_layers::render({sh, float((sw - vw) / 2), float((sh - vh) / 2), scale});
+  }
   glBindVertexArray(vao_);
   glActiveTexture(GL_TEXTURE0);
   if (one_to_one(sw, sh)) {
@@ -249,17 +259,19 @@ bool GlPresenter::present(int sw, int sh) {
     glUniform2i(glGetUniformLocation(buffer_program_, "size"), width_, height_);
     glUniform1i(glGetUniformLocation(buffer_program_, "split"), split_);
     glDrawArrays(GL_TRIANGLES, 0, 3);
+    glDisable(GL_BLEND);
     return glGetError() == GL_NO_ERROR;
   }
-  glViewport(0, 0, sw, sh);
-  glClearColor(0, 0, 0, 1); glClear(GL_COLOR_BUFFER_BIT);
-  const float scale = std::min(float(sw) / width_, float(sh) / height_);
-  const int vw = int(width_ * scale), vh = int(height_ * scale);
+  if (!shader_layers::active()) {
+    glViewport(0, 0, sw, sh);
+    glClearColor(0, 0, 0, 1); glClear(GL_COLOR_BUFFER_BIT);
+  }
   glViewport((sw-vw)/2, (sh-vh)/2, vw, vh);
   glBindTexture(GL_TEXTURE_2D, texture_);
   glUseProgram(program_);
   glUniform1i(glGetUniformLocation(program_, "frame"), 0);
   glDrawArrays(GL_TRIANGLES, 0, 3);
+  glDisable(GL_BLEND);
   return glGetError() == GL_NO_ERROR;
 }
 
@@ -271,6 +283,7 @@ void GlPresenter::release_buffer() {
 }
 
 void GlPresenter::release() {
+  shader_layers::release_gl();
   release_buffer();
   if (buffer_program_) glDeleteProgram(buffer_program_);
   buffer_program_ = 0;

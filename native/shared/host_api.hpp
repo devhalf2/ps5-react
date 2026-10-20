@@ -1,7 +1,7 @@
 // Copyright (C) 2026 half144 and PS5 React contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Additional attribution term: see LICENSE-ATTRIBUTION.
-// Native API contract (ABI v9) between the hosts and `@ps5-react/core`. The input actions hosts
+// Native API contract (ABI v10) between the hosts and `@ps5-react/core`. The input actions hosts
 // pass to `__ps5ReactDispatch` are a separate contract with its own version (runtime/js/input.js).
 //
 // host_api.cpp (shared) installs `globalThis.__ps5ReactNative` through
@@ -79,6 +79,12 @@
 //   sound.setVolume(volume)        master gain 0..1 for every sound
 //   text.setLanguage(tag)          ABI v6; BCP 47 language for runtime text (Han glyph forms,
 //                                  shaping); defaults to the system language
+//   shader.create(source)          ABI v10; layer ID for a GLSL 410 core fragment shader (a missing
+//                                  #version line is added); compiled when first drawn
+//   shader.update(id, options)     {x, y, width, height} framebuffer px, opacity 0..1, resolutionScale
+//                                  0.05..1, uniforms {name: number | [2..4 numbers]}; all optional
+//   shader.destroy(id)
+//   shader.error(id)               the GLSL info log of a failed compile or link, else null
 //   exit(relaunch)                 asks the host to close after this frame; with relaunch true it
 //                                  opens the app again once closed and returns true, or the reason
 //                                  it cannot (PS5: needs the payload loader on 127.0.0.1:9021)

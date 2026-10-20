@@ -11,8 +11,10 @@ extern "C" {
 }
 
 bool save_screenshot(const char* path, int step) {
-  const std::uint32_t* pixels = er_software_framebuffer();
-  const int source_width = er_software_fb_width(), source_height = er_software_fb_height();
+  return save_screenshot(path, er_software_framebuffer(), er_software_fb_width(), er_software_fb_height(), step);
+}
+
+bool save_screenshot(const char* path, const std::uint32_t* pixels, int source_width, int source_height, int step) {
   const int width = source_width / step, height = source_height / step, row = (width * 3 + 3) & ~3;
   if (!pixels || width <= 0 || height <= 0) return false;
   FILE* file = std::fopen(path, "wb");
