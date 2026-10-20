@@ -15,6 +15,9 @@
   taken again, without a re-render when still cached, once it turns false. Scopes nest. For a screen kept
   mounted while hidden and for the parts of a long page far from focus (docs/IMAGES.md). From
   MyLuxy/overdrive's engine, which the store-front image fixes there (ef1d389, 7e905b9) rely on.
+- `Archives.extract` accepts a 7z whose encoded header decodes to up to 32 MiB (was the 16 MiB metadata
+  limit): a game's file list in 7-Zip's default LZMA-compressed header passed it and was refused as
+  "Unsupported or incomplete archive.". From MyLuxy/overdrive 0e7112e (ElijaOwO).
 
 ## Unreleased — tester fixes (Pandora 0.3.0)
 
