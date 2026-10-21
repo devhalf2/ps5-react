@@ -48,6 +48,8 @@ constexpr unsigned writer_count = 2;
 static_assert(sizeof(off_t) >= 8, "Large downloads require 64-bit file offsets");
 constexpr std::uint64_t safe_integer = 9007199254740991ULL;
 std::atomic<bool> downloading_file{false};
+// Shared by the two services below, so an id names one task whichever of them runs it.
+std::atomic<std::uint32_t> next_task_id{1};
 
 // Used for optional final-file verification and checkpoint identity, off the JS thread.
 using integrity::Hash;
@@ -273,7 +275,7 @@ unsigned attempt_limit(const Transfer& t) {
 // Exponential from half a second up to 30 seconds, with jitter so throttled ranges do not return
 // together, and never sooner than the server's Retry-After (up to a minute).
 std::chrono::milliseconds retry_delay(const Transfer& t, unsigned attempt) {
-  static std::minstd_rand random(static_cast<unsigned>(Clock::now().time_since_epoch().count()));
+  thread_local std::minstd_rand random(static_cast<unsigned>(Clock::now().time_since_epoch().count()));
   const unsigned base = std::min(30000u, 500u << std::min(attempt-1, 6u));
   const unsigned jittered = base/2 + static_cast<unsigned>(random() % (base/2+1));
   return std::chrono::milliseconds(std::max(std::min(t.retry_after, 60u)*1000u, jittered));
@@ -601,7 +603,7 @@ struct Window {
   bool open(Clock::time_point now) const { return in_flight < allowed && now >= paused_until && (idle || now >= next_connect); }
   bool cooling(Clock::time_point now) const { return refusals && now-refused < cooldown; }
   std::chrono::milliseconds gap() const {
-    static std::minstd_rand random(static_cast<unsigned>(Clock::now().time_since_epoch().count()));
+    thread_local std::minstd_rand random(static_cast<unsigned>(Clock::now().time_since_epoch().count()));
     const unsigned base = 250u << std::min(refusals-1, 4u);
     return std::chrono::milliseconds(base/2 + random() % (base/2+1));
   }
@@ -669,11 +671,16 @@ struct Window {
 
 class Service {
 public:
+  // `files`: the service that writes downloads to disk and owns libSceNet. The other runs only tasks
+  // answered in memory, on a network thread of its own, so they do not wait behind a long download.
+  explicit Service(bool files) : files_(files) {}
   bool start();
   void stop();
   std::uint32_t enqueue(Request request, std::string& error);
   void cancel(std::uint32_t id);
   std::vector<Snapshot> poll();
+  bool running() const { return running_; }
+  const std::string& error() const { return error_; }
 private:
   std::mutex mutex_, disk_mutex_;
   std::condition_variable wake_, disk_wake_, sync_wake_;
@@ -691,7 +698,7 @@ private:
   std::array<pthread_t, writer_count> writer_threads_{};
   unsigned writers_started_ = 0;
   bool running_ = false, network_started_ = false, sync_started_ = false, platform_started_ = false, curl_started_ = false;
-  std::uint32_t next_id_ = 1;
+  const bool files_;
   std::string error_;
   Block* take_block() {
     std::lock_guard lock(disk_mutex_);
@@ -745,7 +752,9 @@ private:
     return static_cast<Transfer*>(opaque)->job->cancelled.load() ? 1 : 0;
   }
 };
-Service service;
+Service service{true};
+// The per-game links, the key check and the update check waited minutes behind a download with one service.
+Service requests{false};
 
 bool spawn(pthread_t& thread, void* (*entry)(void*), void* data) {
   pthread_attr_t attributes;
@@ -759,13 +768,17 @@ bool spawn(pthread_t& thread, void* (*entry)(void*), void* data) {
 bool Service::start() {
   if (running_) return true;
   stopping_ = false; writer_stopping_ = false;
-  platform_started_ = platform_start(error_);
-  if (!platform_started_) return false;
+  // libSceNet is brought up once for the process, by the file service, before the request service starts.
+  if (files_) {
+    platform_started_ = platform_start(error_);
+    if (!platform_started_) return false;
+  }
   if (curl_global_init(CURL_GLOBAL_DEFAULT) != CURLE_OK) { error_ = "curl initialization failed"; stop(); return false; }
   curl_started_ = true;
   multi_ = curl_multi_init();
   if (!multi_) { error_ = "curl multi initialization failed"; stop(); return false; }
   for (Block& block : blocks_) {
+    if (!files_) break;
     block.data = static_cast<char*>(std::malloc(block_size));
     if (!block.data) { error_ = "download buffer allocation failed"; stop(); return false; }
     free_.push_back(&block);
@@ -782,11 +795,14 @@ bool Service::start() {
     if (!t.curl) { error_ = "curl handle allocation failed"; stop(); return false; }
   }
   for (auto& thread : writer_threads_) {
+    if (!files_) break;
     if (!spawn(thread, +[](void* p)->void* { name_thread("dl-writer"); static_cast<Service*>(p)->writer_loop(); return nullptr; }, this)) break;
     ++writers_started_;
   }
-  sync_started_ = writers_started_ == writer_count && spawn(sync_thread_, +[](void* p)->void* { name_thread("dl-sync"); static_cast<Service*>(p)->sync_loop(); return nullptr; }, this);
-  network_started_ = sync_started_ && spawn(network_thread_, +[](void* p)->void* { name_thread("dl-network"); static_cast<Service*>(p)->network_loop(); return nullptr; }, this);
+  sync_started_ = files_ && writers_started_ == writer_count && spawn(sync_thread_, +[](void* p)->void* { name_thread("dl-sync"); static_cast<Service*>(p)->sync_loop(); return nullptr; }, this);
+  network_started_ = (sync_started_ || !files_) && spawn(network_thread_, +[](void* p)->void* {
+    auto* self = static_cast<Service*>(p);
+    name_thread(self->files_ ? "dl-network" : "http-network"); self->network_loop(); return nullptr; }, this);
   if (!network_started_) { error_ = "download worker creation failed"; stop(); return false; }
   running_ = true; return true;
 }
@@ -838,7 +854,7 @@ std::uint32_t Service::enqueue(Request request, std::string& error) {
   for (const auto& job : jobs_) if (!request.destination.empty() && job->request.destination == request.destination) {
     error = "destination already belongs to a queued task"; return 0;
   }
-  auto job = std::make_shared<Job>(std::move(request), next_id_++);
+  auto job = std::make_shared<Job>(std::move(request), next_task_id++);
   jobs_.push_back(job); waiting_.push_back(job); wake_.notify_one();
   return job->snapshot.id;
 }
@@ -1428,7 +1444,7 @@ void Service::run_job(const std::shared_ptr<Job>& job) {
   }
   { std::lock_guard lock(job->mutex); job->snapshot.state = "connecting"; }
   const bool file = !job->request.destination.empty();
-  downloading_file = file;
+  if (files_) downloading_file = file;
   const bool prepared = !file || prepare(*job);
   for (Transfer& t : transfers_) t.probe = false;
   if (prepared && !job->cancelled && !job->recovering) {
@@ -1696,15 +1712,27 @@ void Service::network_loop() {
       job = waiting_.front(); waiting_.pop_front();
     }
     run_job(job);
-    downloading_file = false;
+    if (files_) downloading_file = false;
   }
 }
 } // namespace
-bool start() { return service.start(); }
-void stop() { service.stop(); }
-std::uint32_t enqueue(Request request, std::string& error) { return service.enqueue(std::move(request), error); }
-void cancel(std::uint32_t id) { service.cancel(id); }
-std::vector<Snapshot> poll() { return service.poll(); }
+// Without the request service, tasks answered in memory queue behind downloads as they did before it.
+bool start() {
+  if (!service.start()) return false;
+  if (!requests.start()) platform_log(("requests share the download thread, theirs did not start: " + requests.error()).c_str());
+  return true;
+}
+void stop() { requests.stop(); service.stop(); }
+std::uint32_t enqueue(Request request, std::string& error) {
+  Service& target = request.destination.empty() && requests.running() ? requests : service;
+  return target.enqueue(std::move(request), error);
+}
+void cancel(std::uint32_t id) { requests.cancel(id); service.cancel(id); }
+std::vector<Snapshot> poll() {
+  std::vector<Snapshot> out = service.poll();
+  for (Snapshot& snapshot : requests.poll()) out.push_back(std::move(snapshot));
+  return out;
+}
 bool downloading() { return downloading_file; }
 const char* version() { return curl_version(); }
 } // namespace network

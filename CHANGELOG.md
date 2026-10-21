@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased — fork port (Pandora 0.3.3)
+
+- `Http.request` and every task without a file destination run on a network thread of their own, apart
+  from file downloads. The one service ran its tasks one at a time, so while a download went on for
+  minutes every request waited behind it: an app's JSON from its server, a key check, an update check.
+  Task ids stay one sequence across both; only the download service starts and stops libSceNet and holds
+  the disk buffers, writer and sync threads, and only it sets `downloading()`. If the request thread cannot
+  start, requests queue behind downloads as before and the log says so. From MyLuxy/overdrive 0eea159.
+
 ## Unreleased — fork port (Pandora 0.3.2)
 
 - The engine's image registry holds 512 images (was 256). It holds every decoded image, the decoded

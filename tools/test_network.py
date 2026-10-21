@@ -303,8 +303,10 @@ def main():
         directory = Path(temporary)
         binary = compile_client(directory)
 
-        def run(endpoint, path="-", connections=4, max_bytes=1024*1024, cancel=0, digest="", method="GET", file_limit=0, stop=0, pieces=False, hashes=None, recover=False, reject_html=False, no_redirect=False, mirrors=(), adaptive=False, range_probe=False, range_bytes=0):
+        def run(endpoint, path="-", connections=4, max_bytes=1024*1024, cancel=0, digest="", method="GET", file_limit=0, stop=0, pieces=False, hashes=None, recover=False, reject_html=False, no_redirect=False, mirrors=(), adaptive=False, range_probe=False, range_bytes=0, beside=""):
             environment = dict(os.environ)
+            environment.pop("NETWORK_TEST_BESIDE", None)
+            if beside: environment["NETWORK_TEST_BESIDE"] = origin+beside
             environment.pop("NETWORK_TEST_RANGE_PROBE", None)
             environment.pop("NETWORK_TEST_RANGE_BYTES", None)
             if range_bytes: environment["NETWORK_TEST_RANGE_BYTES"] = str(range_bytes)
@@ -332,6 +334,12 @@ def main():
         assert json.loads(run("/json")["body"]) == {"value": 42}
         assert run("/not-found")["status"] == 404
         assert run("/json", method="HEAD")["body"] == ""
+        # A request answered in memory runs on its own thread, the download not ended, and ids stay one sequence.
+        path = directory / "beside"
+        out = run("/paced", path, cancel=3000, beside="/json")
+        assert out["besideState"] == "completed" and json.loads(out["besideBody"]) == {"value": 42}, out
+        assert out["besideDuring"] == "downloading" and out["besideMilliseconds"] < 1500, out
+        assert out["besideId"] == 2 and out["state"] == "cancelled", out
         metadata = run("/redirect", method="HEAD")
         assert metadata["url"] == origin + "/file", metadata
         assert "content-length" in metadata["headers"]

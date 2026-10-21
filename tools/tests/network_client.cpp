@@ -75,6 +75,12 @@ int main(int argc, char** argv) {
   std::int64_t first_completed = -1;
   std::uint64_t last_completed = 0;
   unsigned completed_drops = 0;
+  // NETWORK_TEST_BESIDE: a request answered in memory, queued once the download is under way, and the
+  // download's state when that request ended.
+  const char* beside_url = std::getenv("NETWORK_TEST_BESIDE");
+  std::uint32_t beside_id = 0;
+  long long beside_queued = 0, beside_ms = -1;
+  std::string state, beside_state, beside_body, beside_during;
   for (;;) {
     const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-started).count();
     if (stop_ms && elapsed >= stop_ms) {
@@ -83,7 +89,21 @@ int main(int argc, char** argv) {
       return 0;
     }
     if ((cancel_ms && elapsed >= cancel_ms) || elapsed > deadline_ms) network::cancel(id);
+    if (beside_url && !beside_id && state == "downloading") {
+      network::Request beside;
+      beside.url = beside_url;
+      beside_id = network::enqueue(std::move(beside), error);
+      if (!beside_id) { std::cerr << error << '\n'; network::stop(); return 4; }
+      beside_queued = elapsed;
+    }
     for (const auto& result : network::poll()) {
+      if (beside_id && result.id == beside_id) {
+        if (result.state == "completed" || result.state == "failed" || result.state == "cancelled") {
+          beside_state = result.state; beside_body = result.body; beside_during = state; beside_ms = elapsed-beside_queued;
+        }
+        continue;
+      }
+      state = result.state;
       peak_buffer = std::max(peak_buffer, result.buffered);
       peak_connections = std::max(peak_connections, result.connections);
       if (result.state == "downloading" && first_completed < 0) first_completed = static_cast<std::int64_t>(result.completed_bytes);
@@ -105,7 +125,9 @@ int main(int argc, char** argv) {
         std::cout << "},\"retries\":" << result.retries
           << ",\"received\":" << result.received << ",\"status\":" << result.status
           << ",\"peakBuffer\":" << peak_buffer << ",\"peakConnections\":" << peak_connections
-          << ",\"milliseconds\":" << elapsed << "}" << '\n';
+          << ",\"milliseconds\":" << elapsed << ",\"besideId\":" << beside_id
+          << ",\"besideState\":" << escaped(beside_state) << ",\"besideBody\":" << escaped(beside_body)
+          << ",\"besideDuring\":" << escaped(beside_during) << ",\"besideMilliseconds\":" << beside_ms << "}" << '\n';
         network::stop(); return result.state == "completed" ? 0 : 1;
       }
     }
