@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased — tester fixes
+
+- Downloads with `adaptive`: a 503 or 429 that comes while none of the origin's ranges is streaming no
+  longer halves its cap or pauses it for the whole Retry-After. New requests wait 5 s (or the Retry-After,
+  if shorter) and the cap stays; a request sent after that and turned away still pauses the origin until
+  the Retry-After ends. A tester's FileKeeper tunnel (`tunnel1.dlproxy.uk`, 54 GB file) held new requests
+  for a few seconds and answered them all 503 with Retry-After: 60 about every 90 s, whatever the connection
+  count, and served requests right after. Each episode that found nothing streaming halved the cap
+  (23, 11, 5, 2, 1) and paused the origin for a minute, so past the halfway mark the download sat at 0 KB/s
+  most of each minute on one connection.
+
 ## Unreleased — fork port (Pandora 0.3.3)
 
 - `Http.request` and every task without a file destination run on a network thread of their own, apart

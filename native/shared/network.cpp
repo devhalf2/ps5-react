@@ -591,9 +591,18 @@ constexpr auto cooldown = std::chrono::seconds(5);
 // growing back to 64 stopped the download at 0 KB/s again and again. The first such answer opens an
 // overload episode lasting its Retry-After: the origin is capped (`ceiling`) at the connections that
 // were streaming then, and they keep going. Answers to requests sent before the episode change nothing.
-// New requests stop until the episode ends only when nothing was streaming, or when the server turns
-// away one sent at the capped count. The cap rises by one a minute after a minute without an episode.
+// The cap rises by one a minute after a minute without an episode.
+//
+// The same tunnel later held every new request for a few seconds and then answered them all 503 with
+// Retry-After: 60, about every minute and a half, at 33 connections as at 1; requests after that were
+// served. With few connections each finishes its range within those seconds, so none is streaming when the
+// 503s come, and that says nothing about how many the origin takes: halving the origin at each such
+// episode and pausing it for the whole Retry-After took a 54 GB download down to 1 connection, idle
+// most of every minute. When nothing streams the cap stays and new requests wait `overload_probe`; the
+// ones turned away wait out Retry-After. New requests stop until the episode ends when the server turns
+// away one sent after it began.
 constexpr auto overload_relief = std::chrono::seconds(60);
+constexpr auto overload_probe = std::chrono::seconds(5);
 struct Window {
   std::string host;
   // `idle` counts the connections finished ranges left open, which the next transfers reuse.
@@ -644,14 +653,16 @@ struct Window {
   void overloaded(Clock::time_point now, Clock::time_point started, unsigned streaming, unsigned retry_after) {
     const auto wait = std::chrono::seconds(std::clamp(retry_after, 1u, 60u));
     if (now >= overload_until) {
-      const unsigned cap = streaming ? streaming : std::max(1u, allowed/2);
-      if (cap < ceiling) ceiling = cap;
+      if (streaming && streaming < ceiling) ceiling = streaming;
       allowed = std::min(allowed, ceiling);
       congested = true; shrunk = grown = overload_since = now; overload_until = now+wait;
-      if (!streaming) paused_until = std::max(paused_until, overload_until);
+      const auto probe = std::min<Clock::duration>(wait, overload_probe);
+      if (!streaming) paused_until = std::max(paused_until, now+probe);
       platform_log(("download: " + host + " is overloaded (HTTP 503/429, Retry-After " + std::to_string(retry_after) +
-                    " s); " + std::to_string(streaming) + " connections streaming, capped at " + std::to_string(ceiling) +
-                    (streaming ? "" : "; new ones wait it out")).c_str());
+                    " s); " + std::to_string(streaming) + " connections streaming, " +
+                    (ceiling == UINT_MAX ? "no cap" : "capped at " + std::to_string(ceiling)) +
+                    (streaming ? "" : "; new ones wait " +
+                     std::to_string(std::chrono::duration_cast<std::chrono::seconds>(probe).count()) + " s")).c_str());
       return;
     }
     if (started >= overload_since && paused_until < overload_until) {

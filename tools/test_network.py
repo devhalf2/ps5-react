@@ -50,6 +50,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
     TUNNEL_LIMIT = 8
     tunnel_busy = 0
     tunnel = []
+    # /bursting serves like the same tunnel in a later tester log: whatever the connection count, every
+    # minute and a half it held new requests for a few seconds and then answered them all 503 with
+    # Retry-After: 60, and requests after that were served. Here the window is BURST seconds from
+    # BURST_AT after the first range; a range asked for in it waits for its end. Each range request is
+    # logged as (time, Range, status), and the ranges served at once as (time, count).
+    BURST_AT, BURST = 0.5, 1.0
+    burst_first = None
+    burst_busy = 0
+    bursting = []
+    burst_streams = []
 
     def respond(self, head=False):
         if self.path == "/hop":
@@ -84,6 +94,31 @@ class Handler(http.server.BaseHTTPRequestHandler):
             finally:
                 with self.guard:
                     Handler.tunnel_busy -= 1
+        if self.path == "/bursting" and self.headers.get("Range") not in (None, "bytes=0-0"):
+            with self.guard:
+                now = time.monotonic()
+                Handler.burst_first = Handler.burst_first or now
+                opens = Handler.burst_first + Handler.BURST_AT
+            if opens <= now < opens + Handler.BURST:
+                time.sleep(opens + Handler.BURST - now)
+                with self.guard:
+                    Handler.bursting.append((time.monotonic(), self.headers["Range"], 503))
+                body = b"Service Unavailable"
+                self.send_response(503)
+                self.send_header("Retry-After", "15")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            with self.guard:
+                Handler.bursting.append((now, self.headers["Range"], 206))
+                Handler.burst_busy += 1
+                Handler.burst_streams.append((now, Handler.burst_busy))
+            try:
+                return self.serve(head)
+            finally:
+                with self.guard:
+                    Handler.burst_busy -= 1
         if not self.path.startswith("/throttled") or self.headers.get("Range") in (None, "bytes=0-0"):
             return self.serve(head)
         with self.guard:
@@ -163,7 +198,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.wfile.write(body)
             return
         piece = re.search(r"/piece([0-2])$", path)
-        payload = PIECES[int(piece[1])] if piece else LARGE if path in ("/paced", "/tunnel") else DATA
+        payload = PIECES[int(piece[1])] if piece else LARGE if path in ("/paced", "/tunnel") else DATA*2 if path == "/bursting" else DATA
         if path.endswith("-mutable") and self.mutated:
             payload = bytes(reversed(DATA))
         total = 4*1024**3 + 1024**2 if path == "/large-offset" else len(payload)
@@ -235,6 +270,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     time.sleep(0.02)
                 if path in ("/paced", "/tunnel"):
                     time.sleep(0.03)
+                if path == "/bursting":
+                    time.sleep(0.01)
                 if path == "/truncated" and selected != "bytes=0-0":
                     self.close_connection = True
                     self.connection.shutdown(socket.SHUT_RDWR)
@@ -303,13 +340,15 @@ def main():
         directory = Path(temporary)
         binary = compile_client(directory)
 
-        def run(endpoint, path="-", connections=4, max_bytes=1024*1024, cancel=0, digest="", method="GET", file_limit=0, stop=0, pieces=False, hashes=None, recover=False, reject_html=False, no_redirect=False, mirrors=(), adaptive=False, range_probe=False, range_bytes=0, beside=""):
+        def run(endpoint, path="-", connections=4, max_bytes=1024*1024, cancel=0, digest="", method="GET", file_limit=0, stop=0, pieces=False, hashes=None, recover=False, reject_html=False, no_redirect=False, mirrors=(), adaptive=False, range_probe=False, range_bytes=0, beside="", timeout=20):
             environment = dict(os.environ)
             environment.pop("NETWORK_TEST_BESIDE", None)
             if beside: environment["NETWORK_TEST_BESIDE"] = origin+beside
             environment.pop("NETWORK_TEST_RANGE_PROBE", None)
             environment.pop("NETWORK_TEST_RANGE_BYTES", None)
             if range_bytes: environment["NETWORK_TEST_RANGE_BYTES"] = str(range_bytes)
+            # The client cancels a download five seconds before the harness gives up on it.
+            environment["NETWORK_TEST_DEADLINE_MS"] = str((timeout-5)*1000)
             if range_probe: environment["NETWORK_TEST_RANGE_PROBE"] = "1"
             for name in ("NETWORK_TEST_RECOVER", "NETWORK_TEST_REJECT_HTML", "NETWORK_TEST_NO_REDIRECT", "NETWORK_TEST_ADAPTIVE"):
                 environment.pop(name, None)
@@ -323,7 +362,7 @@ def main():
                 environment["NETWORK_TEST_MIRRORS"] = ",".join(origin+m for m in mirrors)
             result = subprocess.run([str(binary), (endpoint if endpoint.startswith("https:") else origin+endpoint), str(path), str(connections), str(max_bytes),
                                      str(cancel), digest, method, str(file_limit), str(stop),
-                                     "pieces" if pieces else "single", *(hashes or [])], capture_output=True, text=True, timeout=20, env=environment)
+                                     "pieces" if pieces else "single", *(hashes or [])], capture_output=True, text=True, timeout=timeout, env=environment)
             if not result.stdout.strip():
                 raise AssertionError(result.stderr or f"client exited {result.returncode}")
             out = json.loads(result.stdout)
@@ -501,6 +540,27 @@ def main():
             again = [later for later, other, _ in Handler.tunnel if other == selected and later > at]
             assert again and again[0] - at >= 1.9, (selected, at, again)
         print(f"Overloaded origin: {len(refused)} answered 503 in one burst, {out['retries']} retries, {elapsed:.1f} s")
+        path.unlink()
+        # The same tunnel later held new requests for a while and answered all of them 503 with Retry-After,
+        # so no range of the origin was streaming when the 503s came. Halving the origin and pausing it for
+        # the whole Retry-After at each such burst took a 4-connection download down to 1, waiting most of
+        # every minute. The origin keeps its connections and tries again after a few seconds; the ranges
+        # turned away still wait out their Retry-After.
+        path = directory / "bursting"
+        out = run("/bursting", path, connections=4, adaptive=True, range_bytes=1024*1024,
+                  digest=hashlib.sha256(DATA*2).hexdigest(), timeout=40)
+        assert out["state"] == "completed", out
+        assert path.read_bytes() == DATA*2
+        refused = [(at, selected) for at, selected, status in Handler.bursting if status == 503]
+        assert refused, Handler.bursting
+        ended = refused[0][0]
+        for at, selected in refused:
+            again = [later for later, other, _ in Handler.bursting if other == selected and later > at]
+            assert again and again[0] - at >= 14.9, (selected, at, again)
+        between = [at for at, _, status in Handler.bursting if status == 206 and ended < at < ended + 14]
+        assert between and between[0] - ended < 10, (ended, Handler.bursting)
+        assert max(count for at, count in Handler.burst_streams if at > ended) == 4, Handler.burst_streams
+        print(f"Bursting origin: {len(refused)} answered 503 together, served again {between[0] - ended:.1f} s later")
         path.unlink()
         # A pinned redirect target that keeps failing is resolved again, and the new target is pinned.
         path = directory / "hop"
