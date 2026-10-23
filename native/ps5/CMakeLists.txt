@@ -60,12 +60,14 @@ set(ERUI_PERF_STATS ON CACHE BOOL "" FORCE)
 set(ERUI_MAX_NODES 4096 CACHE STRING "" FORCE)
 # The fade cache: while a translucent group's content is unchanged between frames (a pure opacity
 # fade), the engine blends one copy of it captured on the first frame instead of re-rendering and
-# re-compositing the subtree every frame. One 1920x1080 slot, 8.3 MB of .bss, so a full-screen fade
-# (an app darkening its whole screen between pages) costs a blend per frame at 1080p; a group larger
-# than the slot (a full screen at 2160p) takes the strip path. Any content change inside the group
-# drops the copy and that frame takes the strip path as before.
-set(ERUI_FADE_CACHE_W 1920 CACHE STRING "" FORCE)
-set(ERUI_FADE_CACHE_H 1080 CACHE STRING "" FORCE)
+# re-compositing the subtree every frame; the render workers capture it together, each its own rows.
+# One 2560x1440 slot, 14.7 MB of .bss, so a full-screen fade (an app darkening its whole screen between
+# pages) costs a blend per frame up to a 1440p render; a group larger than the slot (a full screen at
+# 2160p) takes the strip path. A 3840x2160 slot would cost 33 MB, 19 MB more, and leave 8 MiB above the
+# step where the heap drops to 128 MiB on a console with 320 MiB of flexible memory free. Any content
+# change inside the group drops the copy and that frame takes the strip path as before.
+set(ERUI_FADE_CACHE_W 2560 CACHE STRING "" FORCE)
+set(ERUI_FADE_CACHE_H 1440 CACHE STRING "" FORCE)
 foreach(FEATURE SMOKE RUNTEST SPLITTEST GCTEST COMPILE)
   set(ER_BRIDGE_QUICKJS_${FEATURE} OFF CACHE BOOL "" FORCE)
 endforeach()
