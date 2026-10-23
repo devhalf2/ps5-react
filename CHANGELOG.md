@@ -16,6 +16,8 @@
   buffer textures as the one-to-one size is, filtered bilinearly in the shader, instead of a 2D texture:
   `glTexSubImage2D` of 1920 x 540 takes 14.9 ms on the PS5, so a full 1440p frame would have cost about 50 ms
   of upload.
+- The desktop preview reports every slow frame with `PS5_REACT_SLOW_FRAME_LINES` (a count per two-second
+  window), as `dev/slow-frame-lines.txt` does on the PS5.
 
 ## Unreleased — tester fixes
 

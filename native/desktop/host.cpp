@@ -866,6 +866,9 @@ int main(int argc, char** argv) {
       if (*ms && !*rest && value > 0 && value <= 60000) host.slow_frame_us = static_cast<Uint32>(value) * 1000;
       else std::fprintf(stderr, "PS5_REACT_SLOW_FRAME_MS: expected milliseconds (1-60000), got '%s'\n", ms);
     }
+    // Every slow frame instead of the first few per window, as the PS5's dev/slow-frame-lines.txt.
+    if (const char* lines = std::getenv("PS5_REACT_SLOW_FRAME_LINES"); lines && std::atoi(lines) > 0)
+      host.stats.set_slow_line_limit(static_cast<std::uint32_t>(std::atoi(lines)));
     if (const char* text = std::getenv("PS5_REACT_INPUT_SCRIPT")) {
       char error[160];
       ok = host.script.parse(text, error, sizeof error);
