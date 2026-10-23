@@ -1,3 +1,8 @@
+Changes to source/owned_root_daemon.c of mpereiraesaa/PS5-Lapy-JB-Daemon
+(revision 54a095c0f19161825e845daa760a03b446e654fa) for the 32 attribute bytes of
+payload SDK v0.42. That file is Copyright (c) 2026 Arksama (Team PHU), MIT License:
+https://github.com/mpereiraesaa/PS5-Lapy-JB-Daemon/blob/54a095c0f19161825e845daa760a03b446e654fa/LICENSE
+
 --- a/source/owned_root_daemon.c
 +++ b/source/owned_root_daemon.c
 @@ -79,3 +79,4 @@

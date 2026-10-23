@@ -125,6 +125,11 @@ This file is not covered by the framework's additional attribution term.
 `tools/tailwind/colors.mjs` reproduces the Tailwind CSS palette unchanged under
 its MIT notice in `licenses/tailwindcss-LICENSE`.
 The Inter font and bundled third-party license texts retain their own terms.
+`licenses/` also keeps, unchanged from the revisions pinned in
+`dependencies.lock.json`, the license texts of QuickJS-ng (`quickjs-ng-LICENSE`),
+HarfBuzz (`harfbuzz-COPYING`), SheenBidi (`SheenBidi-LICENSE`), stb
+(`stb-LICENSE`) and UnRAR (`UnRAR-license.txt`). `patches/unrar-worker.patch`
+modifies UnRAR source code and carries the paragraph its license requires.
 
 `LICENSE`, `LICENSE-ATTRIBUTION`, `NOTICE`, `licenses/`, and generated
 `dist/<TITLE_ID>/notices/` preserve credits and licensing information.

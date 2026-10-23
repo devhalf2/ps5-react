@@ -1,3 +1,7 @@
+Modified ps5-homebrew-ui source (revision 4bd942579dd981b3df9c740438489ca6a614ddc0),
+Copyright (C) 2026 BlackBearReloaded, GPL-3.0-or-later. Changed by PS5 React on
+2026-10-08: the title heap is sized from free flexible memory instead of 128 MiB.
+
 diff --git a/src/runtime/app_heap.c b/src/runtime/app_heap.c
 index 786cba1..a3527af 100644
 --- a/src/runtime/app_heap.c

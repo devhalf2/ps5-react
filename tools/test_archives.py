@@ -65,7 +65,7 @@ def plain_rar4(name,data,end=True):
  fields=struct.pack("<IIBIIBBHI",len(data),len(data),3,binascii.crc32(data),0,29,0x30,len(name),0o100644)+name.encode()
  return b"Rar!\x1a\x07\x00"+block(0x73,0,bytes(6))+block(0x74,0x8000,fields,data)+(block(0x7b,0x4000) if end else b"")
 
-def encrypted_rar5(data,password="DLPSGAME.COM",name="nested/game.ffpfsc",headers=True,volumes=1,compression=0,crypto_flags=1,quick_open=False):
+def encrypted_rar5(data,password="fixture-password",name="nested/game.ffpfsc",headers=True,volumes=1,compression=0,crypto_flags=1,quick_open=False):
  """Independent RAR5 fixture with AES-CBC data/headers and spec password checks."""
  salt=bytes(range(16));power=15;iterations=1<<power
  key=hashlib.pbkdf2_hmac("sha256",password.encode(),salt,iterations)
@@ -192,8 +192,8 @@ def main():
   assert not (root/"zip-no-memory").exists() and not (root/"zip-no-memory.extracting").exists()
   # Real password-protected ZIP: correct password, incorrect/missing password, and ordered volumes.
   protected=root/"protected.zip";payload=root/"protected.bin";payload.write_bytes(DATA)
-  subprocess.run(["/usr/bin/zip","-q","-P","DLPSGAME.COM",str(protected),payload.name],cwd=root,check=True)
-  assert run("zip-password",[protected],password="DLPSGAME.COM")[0]=="completed"
+  subprocess.run(["/usr/bin/zip","-q","-P","fixture-password",str(protected),payload.name],cwd=root,check=True)
+  assert run("zip-password",[protected],password="fixture-password")[0]=="completed"
   assert (root/"zip-password/protected.bin").read_bytes()==DATA
   for name,password in [("wrong-password","wrong"),("missing-password",None)]:
    assert run(name,[protected],password=password)[0]=="failed"
@@ -201,12 +201,12 @@ def main():
   blob=protected.read_bytes();protected_parts=[]
   for i in range(3):
    volume=root/f"protected-part{i}";volume.write_bytes(blob[i*len(blob)//3:(i+1)*len(blob)//3]);protected_parts.append(volume)
-  assert run("zip-password-volumes",protected_parts,password="DLPSGAME.COM")[0]=="completed"
+  assert run("zip-password-volumes",protected_parts,password="fixture-password")[0]=="completed"
   assert (root/"zip-password-volumes/protected.bin").read_bytes()==DATA
   for headers in [True,False]:
    name="rar5-encrypted-headers" if headers else "rar5-encrypted-data"
    rar=root/(name+".rar");rar.write_bytes(encrypted_rar5(DATA,headers=headers)[0])
-   result=run(name,[rar],password="DLPSGAME.COM")
+   result=run(name,[rar],password="fixture-password")
    assert result[0]=="completed",result
    assert (root/name/"game.ffpfsc").read_bytes()==DATA
    result=run(name+"-wrong",[rar],password="wrong")
@@ -215,7 +215,7 @@ def main():
   for headers in [True,False]:
    name="rar5-quick-open-headers" if headers else "rar5-quick-open-data"
    rar=root/(name+".rar");blob=encrypted_rar5(DATA,headers=headers,quick_open=True)[0];rar.write_bytes(blob)
-   result=run(name,[rar],password="DLPSGAME.COM")
+   result=run(name,[rar],password="fixture-password")
    assert result[0]=="completed",result
    assert (root/name/"game.ffpfsc").read_bytes()==DATA
    assert not any(p.name=="QO" for p in (root/name).rglob("*"))
@@ -223,20 +223,20 @@ def main():
     parts=[]
     for i in range(3):
      part=root/f"{name}-part-{i}";part.write_bytes(blob[i*len(blob)//3:(i+1)*len(blob)//3]);parts.append(part)
-    result=run(name+"-volumes",parts,password="DLPSGAME.COM")
+    result=run(name+"-volumes",parts,password="fixture-password")
     assert result[0]=="completed",result
     assert (root/(name+"-volumes")/"game.ffpfsc").read_bytes()==DATA
    # The ignored service payload must still be complete; never accept a truncated input.
    truncated=root/(name+"-truncated.rar");truncated.write_bytes(blob[:-100])
-   result=run(name+"-truncated",[truncated],password="DLPSGAME.COM")
+   result=run(name+"-truncated",[truncated],password="fixture-password")
    assert result[0]=="failed" and not (root/(name+"-truncated")).exists(),result
   # A real file called QO must retain password authentication.
   rar=root/"qo-file.rar";rar.write_bytes(encrypted_rar5(DATA,name="QO",password="other",headers=False)[0])
-  assert run("qo-file",[rar],password="DLPSGAME.COM")[0]=="failed"
+  assert run("qo-file",[rar],password="fixture-password")[0]=="failed"
   rar_parts=[]
   for i,blob in enumerate(encrypted_rar5(DATA,volumes=2)):
    volume=root/f"encrypted-volume-{i}.rar";volume.write_bytes(blob);rar_parts.append(volume)
-  result=run("rar5-password-volumes",rar_parts,password="DLPSGAME.COM")
+  result=run("rar5-password-volumes",rar_parts,password="fixture-password")
   assert result[0]=="completed",result
   assert (root/"rar5-password-volumes/game.ffpfsc").read_bytes()==DATA
   # Real `rar a -ma5 -m3 -hp -v20k` output: compressed blocks and the one AES-CBC stream of the file
@@ -248,17 +248,17 @@ def main():
   corrupt=root/"corrupt-encrypted.rar"
   damaged=bytearray(encrypted_rar5(DATA)[0]);damaged[-64]^=1
   corrupt.write_bytes(damaged)
-  result=run("rar5-corrupt",[corrupt],password="DLPSGAME.COM")
+  result=run("rar5-corrupt",[corrupt],password="fixture-password")
   assert result[0]=="failed" and "checksum" in result[-1].lower(),result
   assert corrupt.exists() and not (root/"rar5-corrupt").exists()
   empty=root/"empty-encrypted.rar";empty.write_bytes(encrypted_rar5(b"",compression=4<<7|8<<10)[0])
-  result=run("rar5-empty",[empty],password="DLPSGAME.COM");assert result[0]=="completed",result
+  result=run("rar5-empty",[empty],password="fixture-password");assert result[0]=="completed",result
   assert (root/"rar5-empty/game.ffpfsc").read_bytes()==b""
   for name,kwargs in [("rar5-encrypted-window",{"compression":3<<7|9<<10}),
                        ("rar5-encrypted-traversal",{"name":"../escape"}),
                        ("rar5-keyed-checksum",{"crypto_flags":3})]:
    rar=root/(name+".rar");rar.write_bytes(encrypted_rar5(DATA,**kwargs)[0])
-   result=run(name,[rar],password="DLPSGAME.COM")
+   result=run(name,[rar],password="fixture-password")
    assert result[0]=="failed",result
    assert not (root/name).exists() and rar.exists()
   # A non-ASCII name in a process left in the C locale, as on the console (the Teardown backport).
@@ -358,7 +358,7 @@ def main():
   for i,blob in enumerate(encrypted_rar5(DATA,headers=False,volumes=4)):
    volume=root/f"rar5-open-headers.part{i+1}.rar";volume.write_bytes(blob);rar5_open.append(volume)
   sets=[("rar5-encrypted",real,"fixture-password",words()),("rar4-encrypted",rar4,"fixture-password",words()),
-        ("rar5-open-headers",rar5_open,"DLPSGAME.COM",DATA)]
+        ("rar5-open-headers",rar5_open,"fixture-password",DATA)]
   sets.append(("rar4-open",[uudecode(source,root/source.stem) for source in sorted((ROOT/"tools/tests/archives").glob("test_rar_multivolume_single_file.part*.rar.uu"))],None,None))
   for name,parts,password,content in sets:
    result=run(name+"-complete",parts,password=password)
@@ -383,20 +383,20 @@ def main():
    assert (root/name/"game.bin").read_bytes()==DATA
   # A whole RAR5 volume without an end block was not the last one; an archive that is no volume set is.
   last=root/"rar5-open-no-end.rar";last.write_bytes(rar5_open[-1].read_bytes()[:-8])
-  assert worker([*rar5_open[:-1],last],"DLPSGAME.COM")==["ready","fail "+NO_LAST]
+  assert worker([*rar5_open[:-1],last],"fixture-password")==["ready","fail "+NO_LAST]
   single=root/"rar5-single-no-end.rar";single.write_bytes(encrypted_rar5(DATA,headers=False)[0][:-8])
-  assert run("rar5-single-no-end",[single],password="DLPSGAME.COM")[0]=="completed"
+  assert run("rar5-single-no-end",[single],password="fixture-password")[0]=="completed"
   assert (root/"rar5-single-no-end/game.ffpfsc").read_bytes()==DATA
   # A header damaged within the last volume is not a cut: the shorter volume 2 is still the one named.
   damaged=[root/f"rar5-junk-{i}.rar" for i in range(4)]
   for i,copy in enumerate(damaged):copy.write_bytes(rar5_open[i].read_bytes())
   last=damaged[3].read_bytes();damaged[3].write_bytes(last[:-8]+bytes(4)+bytes([3,9,0,0])+last[-8:])
   damaged[1].write_bytes(damaged[1].read_bytes()[:-3000])
-  result=run("rar5-junk",damaged,password="DLPSGAME.COM")
+  result=run("rar5-junk",damaged,password="fixture-password")
   assert result[0]=="failed" and result[-1].endswith("Volume 2 of 4 looks incomplete."),result
   # A last volume cut short (a download stopped early) is not a missing one: it fails as before, named, so
   # the app downloads that volume again. Cut in its data, in a header, and in the end block.
-  for name,parts,password in [("rar5-encrypted",real,"fixture-password"),("rar4-encrypted",rar4,"fixture-password"),("rar5-open-headers",rar5_open,"DLPSGAME.COM")]:
+  for name,parts,password in [("rar5-encrypted",real,"fixture-password"),("rar4-encrypted",rar4,"fixture-password"),("rar5-open-headers",rar5_open,"fixture-password")]:
    for cut in (len(parts[-1].read_bytes())//2,40,3):
     copy=root/f"{name}-cut-{cut}";copy.write_bytes(parts[-1].read_bytes()[:-cut])
     result=run(f"{name}-cut-last-{cut}",[*parts[:-1],copy],password=password)
@@ -406,7 +406,7 @@ def main():
   single=root/"rar4-single-cut.rar";single.write_bytes(plain_rar4("game.bin",DATA,end=False)[:-100])
   result=run("rar4-single-cut",[single]);assert result[0]=="failed" and result[-1]!=NO_LAST,result
   single=root/"rar5-single-cut.rar";single.write_bytes(encrypted_rar5(DATA)[0][:-100])
-  result=run("rar5-single-cut",[single],password="DLPSGAME.COM");assert result[0]=="failed" and result[-1]!=NO_LAST,result
+  result=run("rar5-single-cut",[single],password="fixture-password");assert result[0]=="failed" and result[-1]!=NO_LAST,result
   # Real archive split byte stream: ordered volumes, no temporary joined copy.
   blob=tar.read_bytes();parts=[]
   for i in range(3):

@@ -22,10 +22,10 @@
   "author": "half144",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/half144/ps5-react.git"
+    "url": "git+https://github.com/overdriveps5/ps5-react.git"
   },
-  "homepage": "https://github.com/half144/ps5-react#readme",
+  "homepage": "https://github.com/overdriveps5/ps5-react#readme",
   "bugs": {
-    "url": "https://github.com/half144/ps5-react/issues"
+    "url": "https://github.com/overdriveps5/ps5-react/issues"
   }
 }

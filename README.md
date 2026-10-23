@@ -65,7 +65,7 @@ The supported development environment is **macOS on Apple Silicon**.
 2. Clone the project and install dependencies:
 
    ```sh
-   git clone https://github.com/half144/ps5-react.git
+   git clone https://github.com/overdriveps5/ps5-react.git
    cd ps5-react
    python3 -m venv .venv
    source .venv/bin/activate
@@ -667,7 +667,7 @@ excluded from version control.
 
 ## Credits and license
 
-Created by **[half144](https://github.com/half144)** and PS5 React contributors.
+Created by **half144** and PS5 React contributors.
 Built on [Embedded React](https://github.com/TheMasterCoder007/embedded-react),
 [ps5-homebrew-ui](https://github.com/blackbearreloaded/ps5-homebrew-ui),
 [ps5-opengl](https://github.com/blackbearreloaded/ps5-opengl),
