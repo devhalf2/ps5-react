@@ -103,6 +103,8 @@ constexpr long kHostConnections = 8;
 constexpr auto kDwell = std::chrono::milliseconds(120);
 std::atomic<std::size_t> cache_bytes{kCacheBytes};
 std::atomic<int> holds{0};
+// Decode costs of the images being decoded (Service::decoding_), for the heap ceiling each decoder checks.
+std::atomic<std::size_t> decoding_bytes{0};
 std::atomic<Heap (*)()> heap_probe{nullptr};
 Heap heap() {
   const auto probe = heap_probe.load();
@@ -380,7 +382,9 @@ bool decode(Entry& entry) {
   const int channels = components == 2 || components == 4 ? 4 : 3;
   const Plan p = plan(width, height, entry.box_width, entry.box_height, entry.fit);
   const std::size_t need = static_cast<std::size_t>(width) * height * 8 + static_cast<std::size_t>(p.out_width) * p.out_height * 4;
-  if (const Heap h = heap(); h.size && h.live + need > h.size / 100 * kCeilingPercent) {
+  // The other decoders may be about to allocate theirs: what they hold is not live yet.
+  const std::size_t others = decoding_bytes.load() - entry.decode_cost;
+  if (const Heap h = heap(); h.size && h.live + others + need > h.size / 100 * kCeilingPercent) {
     entry.body.reset();
     entry.error = message(entry, "out of memory to decode (heap near full)");
     return false;
@@ -1020,6 +1024,7 @@ private:
         entry = std::move(*next);
         decodes_.erase(next);
         decoding_ += entry->decode_cost;
+        decoding_bytes = decoding_;
       }
       const auto started = Clock::now();
       const bool decoded = decode(*entry);
@@ -1033,6 +1038,7 @@ private:
       {
         std::lock_guard lock(mutex_);
         decoding_ -= entry->decode_cost;
+        decoding_bytes = decoding_;
         if (retry) fetches_.push_back(std::move(entry));
         else finished_.push_back(std::move(entry));
       }
