@@ -12,6 +12,10 @@
   single-core frame of the whole group before.
 - The fade cache holds up to 2560 x 1440 (was 1920 x 1080; 14.7 MB of .bss, the heap stays at 192 MiB with
   320 MiB of flexible memory free), so an app rendering at 1440p fades its whole screen with a blend per frame.
+- A render size smaller than the surface (2560 x 1440 on a 3840 x 2160 surface) is presented through the
+  buffer textures as the one-to-one size is, filtered bilinearly in the shader, instead of a 2D texture:
+  `glTexSubImage2D` of 1920 x 540 takes 14.9 ms on the PS5, so a full 1440p frame would have cost about 50 ms
+  of upload.
 
 ## Unreleased — tester fixes
 

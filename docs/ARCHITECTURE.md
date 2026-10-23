@@ -9,8 +9,8 @@ runtime/js (@ps5-react/core)         focus navigation, controller API, native mo
             ↓ React reconciler / NativeUI / QuickJS
 Embedded React C                    tree, layout, text, rasterization
             ↓ ARGB8888 framebuffer (opaque, except ShaderView cutouts)
-native/shared/GlPresenter           shader layers, then changed rows into buffer textures (1:1) or a
-                                     texture blended over them, presentation
+native/shared/GlPresenter           shader layers, then changed rows into buffer textures (or a
+                                     texture) blended over them, presentation
             ↓
 native/desktop | native/ps5          window/EGL, input, clock, lifecycle,
                                      native modules via native/shared/host_api
@@ -29,12 +29,15 @@ pixels to the render thread, which registers them with the engine
 ([IMAGES.md](IMAGES.md)). Hosts cancel and join all workers before runtime
 shutdown. See
 [NETWORKING.md](NETWORKING.md) for the buffer, heap, stack and queue contract,
-and [NATIVE-API.md](NATIVE-API.md) for the bridge. When the surface matches the
-render size (the PS5), the presenter copies changed framebuffer rows into
-horizontal slices of buffer textures, each within the PS5's 1048576 texels per
-buffer texture (two at 1080p, eight at 2160p), that its shader reads with
-`texelFetch`, one draw per slice: there `glBufferSubData` of 1920×540 takes about
-0.46 ms against 14.9 ms for `glTexSubImage2D`. Other sizes scale a 2D texture.
+and [NATIVE-API.md](NATIVE-API.md) for the bridge. The presenter copies changed
+framebuffer rows into horizontal slices of buffer textures, each within the PS5's
+1048576 texels per buffer texture (two at 1080p, four at 1440p, eight at 2160p),
+that its shader reads with `texelFetch`, one draw per slice: on the PS5
+`glBufferSubData` of 1920×540 takes about 0.46 ms against 14.9 ms for
+`glTexSubImage2D`. When the surface is larger than the render size (a 2560×1440
+render on a 3840×2160 surface) the slice shader filters bilinearly, as
+`GL_LINEAR` would, and each slice also holds the next one's first row for it.
+Without buffer textures every size scales a 2D texture.
 When the engine lists layers (`<Image layer>`, see [IMAGES.md](IMAGES.md)), the
 presenter first draws those images as textured quads, uploaded once per image,
 then the framebuffer over them with premultiplied blending; the engine leaves

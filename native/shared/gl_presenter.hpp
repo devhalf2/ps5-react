@@ -22,8 +22,8 @@ public:
   // Uploads the whole buffer. Afterwards the GPU copy no longer mirrors the
   // engine framebuffer, so the next damage draw uploads everything again.
   bool draw(const std::uint32_t* argb, int surface_width, int surface_height);
-  // Uploads what changed (damage_tracker's contract): at one-to-one size the rows of
-  // `damage` and of the moved rects; otherwise `moves` are replayed on the texture and
+  // Uploads what changed (damage_tracker's contract): through the buffer textures the rows of
+  // `damage` and of the moved rects; without them `moves` are replayed on the 2D texture and
   // then `damage` uploaded. The first draw and any surface size change upload everything.
   bool draw(const std::uint32_t* argb, std::span<const ERRect> damage, std::span<const DamageMove> moves,
             int surface_width, int surface_height);
@@ -39,9 +39,10 @@ private:
   unsigned int scratch_ = 0, read_fbo_ = 0, draw_fbo_ = 0;
   int width_ = 0, height_ = 0, surface_width_ = 0, surface_height_ = 0;
   bool synced_ = false;
-  // Buffer textures of whole framebuffer rows for one-to-one presentation, slice i holding rows
-  // [i * slice_rows_, (i + 1) * slice_rows_). Empty when unsupported.
-  unsigned int buffer_program_ = 0;
+  // Buffer textures of whole framebuffer rows, slice i holding rows [i * slice_rows_, (i + 1) * slice_rows_]
+  // (the next slice's first row too, for a scaled present's bilinear pair). Empty when unsupported.
+  // buffer_program_ presents them one-to-one, scaled_program_ at another surface size.
+  unsigned int buffer_program_ = 0, scaled_program_ = 0;
   std::vector<unsigned int> buffers_, buffer_textures_;
   int slice_rows_ = 0;
   bool buffer_synced_ = false;
@@ -64,6 +65,8 @@ private:
   std::span<const ERLayer> layers_;
 
   bool one_to_one(int surface_width, int surface_height) const;
+  // Whether the framebuffer goes up through the buffer textures (else the 2D texture).
+  bool buffered(int surface_width, int surface_height) const;
   void upload_changed_rows(const std::uint32_t* argb, std::span<const ERRect> damage,
                            std::span<const DamageMove> moves);
   void upload_rows(const std::uint32_t* argb, int y0, int y1);
