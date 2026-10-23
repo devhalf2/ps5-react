@@ -1,7 +1,7 @@
 // Copyright (C) 2026 half144 and PS5 React contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Additional attribution term: see LICENSE-ATTRIBUTION.
-// Remote images: two workers fetch (libcurl) and decode (stb_image) off the render thread and
+// Remote images: a worker fetches (libcurl) and a few decode (stb_image) off the render thread and
 // resample to the size the image is drawn at. The render thread only submits, releases and polls.
 #pragma once
 #include <cstddef>
@@ -30,7 +30,8 @@ constexpr std::size_t kDiskCacheBytes = 256 * 1024 * 1024;
 constexpr std::size_t kLowCacheBytes = 16 * 1024 * 1024;
 constexpr std::size_t kLowEncodedBytes = 1024 * 1024;
 constexpr std::size_t kPressurePercent = 70, kCeilingPercent = 85;
-// One image decodes at a time, holding up to about 8 bytes per source pixel (PNG) while it does.
+// A decode holds up to about 8 bytes per source pixel (PNG); decodes running together hold no more
+// than one at this limit.
 constexpr std::uint64_t kMaxSourcePixels = 5000000;
 
 struct Result {
@@ -45,7 +46,7 @@ struct Result {
 
 // start() requires a started network::start(); `cache_directory` (created when missing, empty to
 // disable) holds the disk cache. stop() calls `evict` for every image handed out by poll(), then
-// joins both workers and frees every image.
+// joins the workers and frees every image.
 bool start(const std::string& cache_directory);
 void stop(void (*evict)(std::uint32_t id));
 // Render thread. Returns the id (0 with `error` on invalid input); each load takes one reference,

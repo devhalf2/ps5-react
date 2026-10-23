@@ -14,6 +14,7 @@ const MARGIN = 32;
 // host's frame callback, not a timer that drifts against the display), in whole pixels: up to 40
 // logical px per 60 Hz frame, reached in four frames, then braking to stop on the target. A held
 // key scrolls at that one steady speed, which also bounds the strip the engine rasterizes per frame.
+// The steps are 60 Hz ticks; a faster display shows positions between them, so speed is the same.
 const MAX_LOGICAL_PX_PER_FRAME = 40;
 const ACCEL_LOGICAL_PX = 12;
 const BRAKE_LOGICAL_PX = 4;
@@ -48,7 +49,8 @@ function assignRef(ref, value) {
 export function createFrame(parent) {
   const frame = {
     parent, x: 0, y: 0, props: {}, forwardedRef: null, handle: null, viewport: null, timer: null, target: null,
-    speed: [0, 0], position: [0, 0], ease: {from: [0, 0], elapsed: 0}, listeners: new Set(),
+    speed: [0, 0], position: [0, 0], from: [0, 0], to: [0, 0], progress: 1, ease: {from: [0, 0], elapsed: 0},
+    listeners: new Set(),
     /** @type {Set<{rect: import('./geometry.js').Rect | null}>} the scroll anchors directly inside */
     anchors: new Set(),
     /**
@@ -109,6 +111,9 @@ export function createFrame(parent) {
       const [maxSpeed, accel, brake] = [MAX_LOGICAL_PX_PER_FRAME, ACCEL_LOGICAL_PX, BRAKE_LOGICAL_PX]
         .map(logical => Math.max(1, Math.round(logical * scale)));
       frame.position = [Math.round(fromX), Math.round(fromY)];
+      frame.from = [...frame.position];
+      frame.to = [...frame.position];
+      frame.progress = 1;
       frame.speed = [0, 0];
       frame.timer = onFrame(elapsedMs => {
         let [x, y] = frame.position;
@@ -120,22 +125,31 @@ export function createFrame(parent) {
             easeOutAt(ease.from[1], frame.target[1], ease.elapsed, EASE_MS)];
           frame.speed = [nextX - x, nextY - y];
           [x, y] = [nextX, nextY];
-        }
-        // A late frame advances the vblanks it covered, at most two, so a hitch is not followed by a jump.
-        else for (let n = Math.min(2, Math.max(1, Math.round(elapsedMs / FRAME_MS))); n > 0; n--) {
-          let speedX, speedY;
-          const capX = catchUpSpeed(frame.target[0] - x, frame.viewport.width, maxSpeed);
-          const capY = catchUpSpeed(frame.target[1] - y, frame.viewport.height, maxSpeed);
-          [x, speedX] = scrollStep(x, frame.speed[0], frame.target[0], capX, accel, brake);
-          [y, speedY] = scrollStep(y, frame.speed[1], frame.target[1], capY, accel, brake);
-          frame.speed = [speedX, speedY];
+        } else {
+          // Steady steps run at 60 Hz ticks. A late frame advances the ticks it covered, at most two, so a
+          // hitch is not followed by a jump; a faster display shows the positions between two ticks.
+          frame.progress += elapsedMs > 0 ? Math.min(2, elapsedMs / FRAME_MS) : 1;
+          for (; frame.progress > 1 + 1e-6; frame.progress--) {
+            let [stepX, stepY] = frame.to, speedX, speedY;
+            const capX = catchUpSpeed(frame.target[0] - stepX, frame.viewport.width, maxSpeed);
+            const capY = catchUpSpeed(frame.target[1] - stepY, frame.viewport.height, maxSpeed);
+            [stepX, speedX] = scrollStep(stepX, frame.speed[0], frame.target[0], capX, accel, brake);
+            [stepY, speedY] = scrollStep(stepY, frame.speed[1], frame.target[1], capY, accel, brake);
+            frame.speed = [speedX, speedY];
+            frame.from = frame.to;
+            frame.to = [stepX, stepY];
+          }
+          const t = Math.min(frame.progress, 1);
+          [x, y] = frame.from.map((from, axis) => Math.round(from + (frame.to[axis] - from) * t));
         }
         const [atX, atY] = NativeUI.scrollTo(frame.handle, x, y);
         deferImageFetches(IMAGE_DEFER_MS);
         // The engine stores offsets as floats. Far from the request means clamped by a content size that
         // changed since the target was chosen: settle where it stopped.
-        if (Math.abs(atX - x) > 0.5) frame.target[0] = frame.ease.from[0] = x = Math.round(atX);
-        if (Math.abs(atY - y) > 0.5) frame.target[1] = frame.ease.from[1] = y = Math.round(atY);
+        const clampX = Math.abs(atX - x) > 0.5, clampY = Math.abs(atY - y) > 0.5;
+        if (clampX) frame.target[0] = frame.ease.from[0] = x = Math.round(atX);
+        if (clampY) frame.target[1] = frame.ease.from[1] = y = Math.round(atY);
+        if (clampX || clampY) [frame.from, frame.to, frame.progress] = [[x, y], [x, y], 1];
         frame.position = [x, y];
         if (x !== frame.target[0] || y !== frame.target[1]) return;
         frame.stop();
@@ -159,9 +173,12 @@ export function createFrame(parent) {
       if (here) NativeUI.scrollTo(frame.handle, NaN, atY - dy);
       frame.y = moved(frame.y);
       if (frame.timer === null) return;
-      // The view and the start of its ease move as the engine's offset did; the target on its own.
+      // The view, the steps around it and the start of its ease move as the engine's offset did; the
+      // target on its own.
       if (here) {
-        frame.position[1] -= dy;
+        frame.position = [frame.position[0], frame.position[1] - dy];
+        frame.from = [frame.from[0], frame.from[1] - dy];
+        frame.to = [frame.to[0], frame.to[1] - dy];
         frame.ease.from[1] -= dy;
       }
       frame.target[1] = moved(frame.target[1]);

@@ -18,7 +18,7 @@ advance is a whole number of pixels, so text draws and measures exactly as
 before.
 
 diff --git a/bridges/quickjs/native_ui_bridge.c b/bridges/quickjs/native_ui_bridge.c
-index 9a7a18c..909ee38 100644
+index 54318f2..f6bbe74 100644
 --- a/bridges/quickjs/native_ui_bridge.c
 +++ b/bridges/quickjs/native_ui_bridge.c
 @@ -378,6 +378,38 @@ static bool to_dim(JSContext* ctx, JSValueConst v, int16_t* out)
@@ -60,7 +60,7 @@ index 9a7a18c..909ee38 100644
  /**
   * @brief Maps a single hex character to its 0–15 value.
   *
-@@ -2408,7 +2440,14 @@ static void apply_props(JSContext* ctx, ERNode* node, JSValueConst obj)
+@@ -2410,7 +2442,14 @@ static void apply_props(JSContext* ctx, ERNode* node, JSValueConst obj)
      ER_U8(PROP_NUMBER_OF_LINES, number_of_lines);
      ER_ENUM(PROP_ELLIPSIZE_MODE, ellipsize_mode, map_ellipsize);
      ER_DIM(PROP_LINE_HEIGHT, line_height);
@@ -76,7 +76,7 @@ index 9a7a18c..909ee38 100644
  
      /* Image. */
      ER_STR(PROP_IMAGE_NAME, image_name, ER_IMAGE_NAME_MAX);
-@@ -3641,10 +3680,10 @@ ER_BRIDGE_MARSHAL_FN(js_set_text_spans)
+@@ -3644,10 +3683,10 @@ ER_BRIDGE_MARSHAL_FN(js_set_text_spans)
          }
          if (prop_get(ctx, seg, "letterSpacing", &v))
          {
@@ -91,7 +91,7 @@ index 9a7a18c..909ee38 100644
              JS_FreeValue(ctx, v);
          }
 diff --git a/engine/include/er_scene.h b/engine/include/er_scene.h
-index b7514f4..f6fa124 100644
+index 273f468..aa49438 100644
 --- a/engine/include/er_scene.h
 +++ b/engine/include/er_scene.h
 @@ -640,7 +640,7 @@ extern "C"
