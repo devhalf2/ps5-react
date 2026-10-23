@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased — frame rate at high render sizes
+
+- A ScrollView over a layer backdrop scrolls by moving its rows (engine patch `embeddedReact-4k-fps.patch`).
+  The backdrop image counted as something painted into the viewport, so every frame of a scroll repainted
+  the whole viewport: Pandora's Browse page at 3840 x 2160 repainted 6.4 million pixels a frame
+  (3840 x 1676), 25-38 ms of raster on a PS5. Now only the exposed strip and what changed are repainted
+  (2560 x 1440 desktop preview, four rows scrolled: 300 to 89 million pixels repainted, 84 full-viewport frames
+  to none).
+- The render workers capture the fade cache together, each its own rows, when a fade begins; it took a
+  single-core frame of the whole group before.
+- The fade cache holds up to 2560 x 1440 (was 1920 x 1080; 14.7 MB of .bss, the heap stays at 192 MiB with
+  320 MiB of flexible memory free), so an app rendering at 1440p fades its whole screen with a blend per frame.
+- A render size smaller than the surface (2560 x 1440 on a 3840 x 2160 surface) is presented through the
+  buffer textures as the one-to-one size is, filtered bilinearly in the shader, instead of a 2D texture:
+  `glTexSubImage2D` of 1920 x 540 takes 14.9 ms on the PS5, so a full 1440p frame would have cost about 50 ms
+  of upload.
+- The desktop preview reports every slow frame with `PS5_REACT_SLOW_FRAME_LINES` (a count per two-second
+  window), as `dev/slow-frame-lines.txt` does on the PS5.
+
 ## Unreleased — tester fixes
 
 - Downloads with `adaptive`: a 503 or 429 that comes while none of the origin's ranges is streaming no

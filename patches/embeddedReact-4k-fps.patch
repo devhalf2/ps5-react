@@ -1,0 +1,449 @@
+Embedded React: scroll over a layer by copy; capture the fade cache on every worker, without thrashing.
+
+Modified from Embedded React (Apache-2.0, Copyright 2026 Cory Lamming) at the
+revision pinned in dependencies.lock.json, after the patches listed before this
+one there. Changed files: engine/scene/compositor.c,
+engine/tests/rendering/test_layers.c and engine/tests/rendering/test_parallel.c.
+Not yet proposed upstream.
+
+A ScrollView over an image the host draws as a layer (a page scrolling over its
+backdrop) repainted its whole viewport on every frame of a scroll: the layer's
+image counted as a foreign node painted into the viewport, and a full-screen one
+covers more than half of it, so the copy gave up. A layer leaves only cleared,
+transparent pixels in the framebuffer, the same at every pixel, so when it
+covers the whole viewport and paints before the ScrollView it is now treated as
+part of the uniform underlay: the rows move and only the exposed strip is
+repainted. test_layers scrolls a list of opaque, translucent and empty rows over
+a layer and compares it with a full repaint, pixel for pixel.
+
+A fade-cache capture could not run inside a parallel slice, so the frame after a
+fade began rendered single-core to capture the group. A full-screen group is
+now captured by the slices themselves when the forked rect holds it whole and no
+other group can be reading the cache that commit: each slice renders its own
+rows of the group into the cache, and the cache takes the group after the join
+only if every slice holding rows of it captured them; otherwise it is left
+empty. One group per fork captures: the first slice to try claims it under the
+host's serial lock, since two groups would write the same rows of the one
+buffer. With the lock, a group the slices cannot capture in a frame no longer
+asks for a single-core frame: a group whose content changed between frames (a
+page whose blocks stagger in as it fades) alternated a parallel frame and a
+single-core capture that never hit. Hosts without the lock keep the
+single-core request. test_parallel
+checks, in a build with workers and a fade cache, that every frame of a fade
+with a second group dimming over it forks and matches the same frame rendered
+single-core.
+
+A group as large as the one fading in the slot no longer evicts it: two
+full-screen fades at once (a page's ground and the page leaving Search) took
+the slot from each other every frame, and each capture asked for a single-core
+frame, so every other frame rendered single-core (33-48 ms of raster at
+2560 x 1440 on an M5). The second group takes the strip path, as a smaller one
+did already.
+diff --git a/engine/scene/compositor.c b/engine/scene/compositor.c
+index a10a008..7ab56e1 100644
+--- a/engine/scene/compositor.c
++++ b/engine/scene/compositor.c
+@@ -1824,6 +1824,21 @@ static uint32_t s_fade_cache_gen = 0;       /* s_content_gen at capture */
+ static int s_fade_cache_w = 0;
+ static int s_fade_cache_h = 0;
+ static uint32_t s_fade_capture_commit = 0; /* anti-thrash: at most one capture per commit */
++/* A capture split across the render workers (composite_from_cache): each slice renders its own rows of the
++ * group into the cache, and the join (fade_fork_end) hands the cache to the group only when every slice
++ * holding rows of it captured them. The forked rect and slice count are set before each fork. */
++typedef struct
++{
++    bool captured;
++    uint16_t tag;
++    int px, py, w, h;
++} FadeSliceCapture;
++static FadeSliceCapture s_fade_slices[ERUI_RENDER_WORKERS];
++static int s_fade_fork_x0, s_fade_fork_y0, s_fade_fork_x1, s_fade_fork_y1;
++static int s_fade_fork_slices = 0; /* 0 outside a fork */
++/* The one group a fork may capture, claimed under the serial lock by the first slice that tries: two groups
++ * captured in one fork would write the same rows of the one buffer at once. 0xFFFF until claimed. */
++static uint16_t s_fade_fork_claim = 0xFFFFu;
+ #endif
+ static uint32_t s_commit_seq = 0;
+ 
+@@ -2083,23 +2098,70 @@ composite_from_cache(ERNode* n, uint8_t alpha, int px, int py, int w, int h, int
+         return true;
+     }
+ 
+-    /* A smaller group does not take the slot from a larger one that is still fading (composited this
+-     * commit or the last): two fades would evict each other every frame and neither would hit. It
++    /* A group no larger than the one still fading in the slot (composited this commit or the last) does
++     * not take it: two fades would evict each other every frame and neither would hit, and each capture
++     * asked for a single-core frame (two full-screen fades alternated parallel and single-core frames). It
+      * takes the strip path, as without the cache. */
+     if (s_fade_cache_tag != 0xFFFFu && s_fade_cache_tag != n->tag && s_commit_seq - s_fade_cache_used <= 1U
+-        && (long)w * h < (long)s_fade_cache_w * s_fade_cache_h)
++        && (long)w * h <= (long)s_fade_cache_w * s_fade_cache_h)
+         return false;
+ 
+-    /* Capture writes the one shared cache buffer — never safe from inside a parallel slice.
+-     * Signal er_commit instead: if the content generation is still the same next commit (a pure
++    /* Capture writes the one shared cache buffer. Inside a parallel slice, when the split capture below
++     * cannot run, signal er_commit instead: if the content generation is still the same next commit (a pure
+      * opacity animation), it renders that one frame single-core so the capture can happen, and
+      * every following parallel frame takes the hit path above. Content that mutates every frame
+      * (the generation moves) never requests the serial frame — those scenes gain more from
+      * staying parallel than from a cache that would be stale immediately. */
+     if (s_parallel_render)
+     {
+-        /* Avoid concurrent writes: any worker may notice the need, but only worker 0 records it. */
+-        if (er_render_worker_id() == 0)
++        /* Each slice captures its own rows of the group, when the forked rect holds the whole group, no other
++         * group can be reading the cache this commit (it has no valid owner, or this group owns it), this
++         * slice's clip holds its rows of the group whole, and the fork's capture is this group's (the first
++         * group a slice tries claims it). Every slice holding rows of the group reaches the same answer; the
++         * join keeps the capture only if all of them took it. */
++        const int worker = er_render_worker_id();
++        const int fork_rows = s_fade_fork_y1 - s_fade_fork_y0;
++        const int sy0 = s_fade_fork_slices > 0 ? s_fade_fork_y0 + fork_rows * worker / s_fade_fork_slices : 0;
++        const int sy1 = s_fade_fork_slices > 0 ? s_fade_fork_y0 + fork_rows * (worker + 1) / s_fade_fork_slices : 0;
++        const int r0 = py > sy0 ? py : sy0;
++        const int r1 = py + h < sy1 ? py + h : sy1;
++        int cx, cy, cw, ch;
++        const bool clip_holds = !er_get_clip_rect(&cx, &cy, &cw, &ch)
++                                || (cx <= px && cx + cw >= px + w && cy <= r0 && cy + ch >= r1);
++        const bool unread = s_fade_cache_tag == 0xFFFFu || s_fade_cache_tag == n->tag || s_fade_cache_gen != s_content_gen;
++        bool claimed = false;
++        if (s_fade_fork_slices > 0 && s_fade_capture_commit != s_commit_seq && unread && r0 < r1 && clip_holds
++            && px >= s_fade_fork_x0 && py >= s_fade_fork_y0 && px + w <= s_fade_fork_x1 && py + h <= s_fade_fork_y1
++            && er_render_serial_supported())
++        {
++            er_render_serial_begin();
++            if (s_fade_fork_claim == 0xFFFFu)
++                s_fade_fork_claim = n->tag;
++            claimed = s_fade_fork_claim == n->tag;
++            er_render_serial_end();
++        }
++        if (claimed)
++        {
++            for (int row = r0; row < r1; row++)
++                memset(s_fade_cache + (size_t)(row - py) * ERUI_FADE_CACHE_W, 0, (size_t)w * sizeof(uint32_t));
++            er_scratch_push_base(s_fade_cache, ERUI_FADE_CACHE_W, ERUI_FADE_CACHE_H, px, py);
++            render_node_content(n, true, false, px, py, w, h, translate_x, translate_y);
++            er_scratch_pop_base();
++            s_fade_slices[worker].captured = true;
++            s_fade_slices[worker].tag = n->tag;
++            s_fade_slices[worker].px = px;
++            s_fade_slices[worker].py = py;
++            s_fade_slices[worker].w = w;
++            s_fade_slices[worker].h = h;
++            er_blit_blend(s_fade_cache, ERUI_FADE_CACHE_W * (int)sizeof(uint32_t), alpha, px, py, w, h);
++            return true;
++        }
++        /* With the serial lock the slices capture for themselves (above), so a group they could not capture
++         * this frame waits for one they can: a single-core frame costs several parallel ones, and a group
++         * whose content changes between frames (a page whose blocks stagger in as it fades) alternated a
++         * parallel frame and a single-core capture that never hit. Without the lock, ask for the single-core
++         * frame as before. Avoid concurrent writes: any worker may notice the need, but only worker 0 records it. */
++        if (!er_render_serial_supported() && er_render_worker_id() == 0)
+         {
+             s_fade_capture_wanted = true;
+             s_fade_capture_wanted_gen = s_content_gen;
+@@ -5293,6 +5355,65 @@ typedef struct
+     int kbd_y;
+ } ParallelRenderJob;
+ 
++/** @brief Opens a fork for split fade-cache captures (composite_from_cache): its rect and slices. */
++static void fade_fork_begin(const ParallelRenderJob* j)
++{
++#if ER_FADE_CACHE_ENABLED
++    s_fade_fork_x0 = j->x0;
++    s_fade_fork_y0 = j->ry0;
++    s_fade_fork_x1 = j->x1;
++    s_fade_fork_y1 = j->ry1;
++    s_fade_fork_slices = j->nslices;
++    s_fade_fork_claim = 0xFFFFu;
++    memset(s_fade_slices, 0, sizeof(s_fade_slices));
++#else
++    (void)j;
++#endif
++}
++
++/**
++ * @brief Closes the fork: a group captured by every slice holding rows of it owns the cache; a capture
++ *        missing a slice leaves the cache invalid, since the slices that took it overwrote it.
++ */
++static void fade_fork_end(void)
++{
++#if ER_FADE_CACHE_ENABLED
++    const int slices = s_fade_fork_slices;
++    s_fade_fork_slices = 0;
++    const FadeSliceCapture* c = NULL;
++    for (int k = 0; k < slices && !c; k++)
++        if (s_fade_slices[k].captured)
++            c = &s_fade_slices[k];
++    if (!c)
++        return;
++    /* A group that lost the claim asked for a single-core capture next commit; this one was captured
++     * instead, and that frame would only evict it. */
++    s_fade_capture_wanted = false;
++    bool whole = true;
++    const int rows = s_fade_fork_y1 - s_fade_fork_y0;
++    for (int k = 0; k < slices && whole; k++)
++    {
++        const int sy0 = s_fade_fork_y0 + rows * k / slices;
++        const int sy1 = s_fade_fork_y0 + rows * (k + 1) / slices;
++        if (sy0 >= sy1 || sy1 <= c->py || sy0 >= c->py + c->h)
++            continue; /* no rows of the group in this slice */
++        const FadeSliceCapture* s = &s_fade_slices[k];
++        whole = s->captured && s->tag == c->tag && s->px == c->px && s->py == c->py && s->w == c->w && s->h == c->h;
++    }
++    s_fade_capture_commit = s_commit_seq;
++    if (!whole)
++    {
++        s_fade_cache_tag = 0xFFFFu;
++        return;
++    }
++    s_fade_cache_tag = c->tag;
++    s_fade_cache_used = s_commit_seq;
++    s_fade_cache_gen = s_content_gen;
++    s_fade_cache_w = c->w;
++    s_fade_cache_h = c->h;
++#endif
++}
++
+ /**
+  * @brief er_parallel_for job: renders slice `worker` of the repaint region.
+  *
+@@ -5437,6 +5558,8 @@ static bool paints_uniformly_over(const ERNode* a, int vx, int vy, int vw, int v
+     return vx >= bx && vy >= by && vx + vw <= bx + bw && vy + vh <= by + bh;
+ }
+ 
++static bool paints_before(const ERNode* a, const ERNode* b);
++
+ /**
+  * @brief Scrolls one ScrollView by moving its painted viewport; false to repaint the viewport instead.
+  *
+@@ -5504,6 +5627,12 @@ static bool scroll_by_copy(ERNode* sv, ERDamageSet* dmg, int rb_x0, int rb_y0, i
+         int fx = (int)n->last_paint_rect.x, fy = (int)n->last_paint_rect.y, fw = (int)n->last_paint_rect.w,
+             fh = (int)n->last_paint_rect.h;
+         clip_rect_to_clippers(n, &fx, &fy, &fw, &fh);
++        /* An image the host draws as a layer under the viewport (a page's backdrop) left only cleared,
++         * transparent pixels across all of it: the same at every pixel, so the content moved over it is
++         * still exact, and its layer shows through wherever the content is clear. */
++        if (n->type == ER_NODE_IMAGE && n->layer_active && fx <= vx && fy <= vy && fx + fw >= vx + vw
++            && fy + fh >= vy + vh && paints_before(n, sv))
++            continue;
+         if (!rect_intersect(&fx, &fy, &fw, &fh, vx, vy, vw, vh))
+             continue;
+         if (foreign_count == ER_SCROLL_FOREIGN_MAX)
+@@ -6931,7 +7060,9 @@ void er_commit(void)
+                 job.nslices = nworkers;
+                 job.kbd_y = s_kbd_avoid_y;
+                 s_parallel_render = true;
++                fade_fork_begin(&job);
+                 er_parallel_for(render_slice_job, &job);
++                fade_fork_end();
+                 s_parallel_render = false;
+                 s_parallel_frames++;
+                 er_push_clip_rect(rb_x0, rb_y0, rb_x1 - rb_x0, rb_y1 - rb_y0);
+@@ -6970,7 +7101,9 @@ void er_commit(void)
+                     job.nslices = nworkers;
+                     job.kbd_y = s_kbd_avoid_y;
+                     s_parallel_render = true;
++                    fade_fork_begin(&job);
+                     er_parallel_for(render_slice_job, &job);
++                    fade_fork_end();
+                     s_parallel_render = false;
+                     any_parallel = true;
+                 }
+diff --git a/engine/tests/rendering/test_layers.c b/engine/tests/rendering/test_layers.c
+index 2be8cad..2516901 100644
+--- a/engine/tests/rendering/test_layers.c
++++ b/engine/tests/rendering/test_layers.c
+@@ -64,6 +64,14 @@ static void clear_cb(int x, int y, int w, int h, void* ctx)
+     g_painted_px += (long)w * h;
+ }
+ 
++static int g_moves = 0;
++
++static void move_cb(int sx, int sy, int w, int h, int dx, int dy, void* ctx)
++{
++    g_inner.move_rect(sx, sy, w, h, dx, dy, ctx);
++    g_moves++;
++}
++
+ static const uint32_t s_red[4] = {0xFFC02010U, 0xFFC02010U, 0xFFC02010U, 0xFFC02010U};
+ static const uint32_t s_blue[4] = {0xFF1040D0U, 0xFF1040D0U, 0xFF1040D0U, 0xFF1040D0U};
+ 
+@@ -187,6 +195,7 @@ int main(void)
+     g_counting.copy_rect = copy_cb;
+     g_counting.blend_rect = blend_cb;
+     g_counting.clear_rect = clear_cb;
++    g_counting.move_rect = move_cb;
+     install();
+     er_reset();
+ 
+@@ -269,6 +278,76 @@ int main(void)
+         fail("a translucent layer over other content is rasterized");
+     check_presented("translucent layer over other content");
+ 
++    /* A ScrollView over a layer backdrop (a page scrolling over its ground): the layer left only cleared,
++     * transparent pixels under the viewport, so a scroll moves the painted rows and repaints the exposed strip,
++     * and the framebuffer matches a full repaint pixel for pixel. */
++    er_reset();
++    install();
++    ERNode* page = node(ER_NODE_VIEW, NULL, 0, 0, FB_W, FB_H, 0xFF203040U);
++    ERNode* ground = er_node_create(ER_NODE_IMAGE);
++    ERProps gp;
++    er_props_default(&gp);
++    gp.position = ER_POS_ABSOLUTE;
++    gp.width = FB_W;
++    gp.height = FB_H;
++    gp.resize_mode = ER_RESIZE_STRETCH;
++    gp.layer = 1;
++    strncpy(gp.image_name, "blue", ER_IMAGE_NAME_MAX);
++    er_node_set_props(ground, &gp);
++    er_tree_append_child(page, ground);
++    ERNode* list = er_node_create(ER_NODE_SCROLL_VIEW);
++    ERProps lp;
++    er_props_default(&lp);
++    lp.position = ER_POS_ABSOLUTE;
++    lp.left = 20;
++    lp.top = 20;
++    lp.width = 120;
++    lp.height = 80;
++    er_node_set_props(list, &lp);
++    er_tree_append_child(page, list);
++    ERNode* column = er_node_create(ER_NODE_VIEW);
++    ERProps colp;
++    er_props_default(&colp);
++    colp.width = 120;
++    colp.height = 30 * 12;
++    er_node_set_props(column, &colp);
++    er_tree_append_child(list, column);
++    for (int i = 0; i < 30; i++)
++    {
++        /* Opaque rows, translucent rows and gaps, so the moved pixels carry every kind of coverage. */
++        ERNode* row = er_node_create(ER_NODE_VIEW);
++        ERProps rowp;
++        er_props_default(&rowp);
++        rowp.width = (int16_t)(60 + i * 2);
++        rowp.height = 12;
++        rowp.background_color = i % 3 == 2 ? 0U : (i % 3 == 0 ? 0xFF000000U : 0x80000000U) | (uint32_t)(i * 2654435761U >> 8);
++        er_node_set_props(row, &rowp);
++        er_tree_append_child(column, row);
++    }
++    er_tree_set_root(page);
++    er_commit();
++    layers = er_get_layers(&count);
++    if (count != 1)
++        fail("the page's ground is a layer");
++    static uint32_t scrolled[FB_W * FB_H];
++    for (int offset = 5; offset <= 47; offset += 7)
++    {
++        g_moves = 0;
++        g_painted_px = 0;
++        er_scroll_view_set_offset(list, 0.0f, (float)offset);
++        er_commit();
++        if (g_moves != 1 || g_painted_px > 120 * 30)
++        {
++            fprintf(stderr, "FAIL scroll over a layer to %d: %d move(s), %ld pixels painted\n", offset, g_moves, g_painted_px);
++            g_failures++;
++        }
++    }
++    memcpy(scrolled, er_software_framebuffer(), sizeof scrolled);
++    install();
++    er_commit();
++    if (memcmp(scrolled, er_software_framebuffer(), sizeof scrolled) != 0)
++        fail("a scroll over a layer matches a full repaint");
++
+     if (g_failures == 0)
+         printf("PASS test_layers\n");
+     return g_failures == 0 ? 0 : 1;
+diff --git a/engine/tests/rendering/test_parallel.c b/engine/tests/rendering/test_parallel.c
+index ca97c89..79975f5 100644
+--- a/engine/tests/rendering/test_parallel.c
++++ b/engine/tests/rendering/test_parallel.c
+@@ -588,6 +588,87 @@ int main(void)
+         embedded_renderer_set_workers(&hooks);
+     }
+ 
++#if ERUI_FADE_CACHE_W >= FB_W && ERUI_FADE_CACHE_H >= FB_H
++    /* ================================================================================
++     * Fade cache: a fading group as tall as the fork's rect is captured by the slices, each its
++     * own rows, so every frame of the fade forks (no single-core capture frame), and each frame
++     * matches the same alpha rendered single-core. A second, smaller group fading over it in the
++     * same frames (a tab dimming as the page fades) must not capture into the same buffer.
++     * ================================================================================ */
++    {
++        static const EmbeddedRenderBackend be = {fill_cb, copy_cb, blend_cb, NULL, NULL, NULL};
++        embedded_renderer_set_backend(&be);
++        EmbeddedRenderWorkers serial_hooks = hooks; /* a split capture claims its group under the lock */
++        serial_hooks.lock = host_lock;
++        serial_hooks.unlock = host_unlock;
++        embedded_renderer_set_workers(&serial_hooks);
++        ERNode* root = new_scene();
++        ERNode* group = er_node_create(ER_NODE_VIEW);
++        ERProps gp = auto_props();
++        gp.position = ER_POS_ABSOLUTE;
++        gp.width = FB_W;
++        gp.height = FB_H;
++        gp.background_color = 0xFF0E7490U;
++        er_node_set_props(group, &gp);
++        for (int i = 0; i < 6; i++)
++        {
++            /* Boxes across the slice boundaries, some translucent, one rounded. */
++            ERNode* box = er_node_create(ER_NODE_VIEW);
++            ERProps bp = auto_props();
++            bp.position = ER_POS_ABSOLUTE;
++            bp.left = (int16_t)(4 + i * 9);
++            bp.top = (int16_t)(3 + i * 8);
++            bp.width = 14;
++            bp.height = 19;
++            bp.border_radius = i == 2 ? 5 : 0;
++            bp.background_color = (i % 2 ? 0x99000000U : 0xFF000000U) | (uint32_t)(0x2F6BD3U * (uint32_t)(i + 1) & 0xFFFFFFU);
++            er_node_set_props(box, &bp);
++            er_tree_append_child(group, box);
++        }
++        er_tree_append_child(root, group);
++        ERNode* tab = er_node_create(ER_NODE_VIEW);
++        ERProps tp2 = auto_props();
++        tp2.position = ER_POS_ABSOLUTE;
++        tp2.left = 30;
++        tp2.top = 24;
++        tp2.width = 20;
++        tp2.height = 16; /* rows 24-39, across the boundary of two slices */
++        tp2.background_color = 0xFFFDE68AU;
++        er_node_set_props(tab, &tp2);
++        er_tree_append_child(root, tab);
++        const ERAnimValueHandle fade = er_anim_value_create(1.0f);
++        er_anim_value_bind(fade, group, ER_PROP_OPACITY);
++        const ERAnimValueHandle dim = er_anim_value_create(1.0f);
++        er_anim_value_bind(dim, tab, ER_PROP_OPACITY);
++        er_commit();
++
++        static uint32_t fb_parallel[FB_W * FB_H];
++        const float alphas[] = {0.8f, 0.6f, 0.45f, 0.3f};
++        for (int i = 0; i < 4; i++)
++        {
++            const uint32_t forks = er_parallel_frames();
++            er_anim_value_set(fade, alphas[i]);
++            er_anim_value_set(dim, 1.0f - alphas[i] / 2.0f);
++            er_commit();
++            if (er_parallel_frames() != forks + 1)
++                return fail("fade cache: a frame of the fade rendered single-core");
++            if (i % 2 == 0)
++                continue; /* two parallel frames in a row: the capture's and the first hit's */
++            memcpy(fb_parallel, s_fb, sizeof(s_fb));
++            embedded_renderer_set_workers(NULL);
++            memset(s_fb, 0, sizeof(s_fb));
++            er_force_full_repaint();
++            er_commit();
++            embedded_renderer_set_workers(&serial_hooks);
++            if (memcmp(fb_parallel, s_fb, sizeof(s_fb)) != 0)
++                return fail("fade cache: parallel and serial framebuffers differ during a fade");
++        }
++        er_anim_value_destroy(fade);
++        er_anim_value_destroy(dim);
++        embedded_renderer_set_workers(&hooks);
++    }
++#endif
++
+     /* ---- Uninstall: back to the exact single-core path. ---- */
+     embedded_renderer_set_workers(NULL);
+     if (er_render_workers_active() != 1)

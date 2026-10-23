@@ -47,6 +47,28 @@ void main() {
 }
 )";
 
+// A render size smaller than the surface (2560 x 1440 on a 3840 x 2160 surface) reads the same slices
+// bilinearly, as GL_LINEAR would, between texel centres with clamped edges: one draw per slice, each keeping
+// the fragments whose upper tap row the slice owns (its buffer holds the next slice's first row as well).
+// The PS5 uploads a 2D texture slowly (a full 3840 x 2160 frame took 113 ms), the buffers do not.
+const char* scaled_fragment_source = R"(#version 410 core
+uniform samplerBuffer rows;
+uniform ivec2 size;
+uniform int first;
+uniform int count;
+uniform vec4 view;
+out vec4 color;
+vec4 texel(ivec2 p) { return texelFetch(rows, (p.y - first) * size.x + p.x).bgra; }
+void main() {
+  vec2 win = gl_FragCoord.xy - view.xy;
+  vec2 p = vec2(win.x, view.w - win.y) * vec2(size) / view.zw - 0.5, f = floor(p), t = p - f;
+  ivec2 a = clamp(ivec2(f), ivec2(0), size - 1), b = clamp(ivec2(f) + 1, ivec2(0), size - 1);
+  if (a.y < first || a.y >= first + count) discard;
+  vec4 top = mix(texel(a), texel(ivec2(b.x, a.y)), t.x), bottom = mix(texel(ivec2(a.x, b.y)), texel(b), t.x);
+  color = mix(top, bottom, t.y);
+}
+)";
+
 // A layer's quad, in framebuffer pixels (dst: x0 y0 x1 y1), over the image pixels src (x0 y0 x1 y1).
 const char* layer_vertex_source = R"(#version 410 core
 uniform vec4 dst;
@@ -122,12 +144,14 @@ bool GlPresenter::init(int width, int height) {
   GLuint vertex = compile(GL_VERTEX_SHADER, vertex_source);
   GLuint fragment = compile(GL_FRAGMENT_SHADER, fragment_source);
   GLuint buffer_fragment = compile(GL_FRAGMENT_SHADER, buffer_fragment_source);
+  GLuint scaled_fragment = compile(GL_FRAGMENT_SHADER, scaled_fragment_source);
   program_ = link(vertex, fragment);
   buffer_program_ = link(vertex, buffer_fragment);
+  scaled_program_ = link(vertex, scaled_fragment);
   GLuint layer_vertex = compile(GL_VERTEX_SHADER, layer_vertex_source);
   GLuint layer_fragment = compile(GL_FRAGMENT_SHADER, layer_fragment_source);
   layer_program_ = link(layer_vertex, layer_fragment);
-  for (GLuint shader : {vertex, fragment, buffer_fragment, layer_vertex, layer_fragment})
+  for (GLuint shader : {vertex, fragment, buffer_fragment, scaled_fragment, layer_vertex, layer_fragment})
     if (shader) glDeleteShader(shader);
   if (!program_) {
     release();
@@ -145,9 +169,10 @@ bool GlPresenter::init(int width, int height) {
   GLint max_texels = 0;
   glGetIntegerv(GL_MAX_TEXTURE_BUFFER_SIZE, &max_texels);
   max_texels_ = max_texels;
-  if (buffer_program_ && max_texels / width > 0) {
-    // Equal slices, each as tall as the limit allows: 2 at 1080p, 8 at 2160p.
-    const int slices = (height + max_texels / width - 1) / (max_texels / width);
+  if (buffer_program_ && max_texels / width > 1) {
+    // Equal slices, each as tall as the limit allows less the next slice's first row, which it holds as
+    // well for the bilinear pair of a scaled present: 2 at 1080p, 4 at 1440p, 8 at 2160p.
+    const int slices = (height + max_texels / width - 2) / (max_texels / width - 1);
     slice_rows_ = (height + slices - 1) / slices;
     buffers_.resize(slices);
     buffer_textures_.resize(slices);
@@ -155,7 +180,7 @@ bool GlPresenter::init(int width, int height) {
     glGenTextures(slices, buffer_textures_.data());
     for (int i = 0; i < slices; ++i) {
       glBindBuffer(GL_TEXTURE_BUFFER, buffers_[i]);
-      glBufferData(GL_TEXTURE_BUFFER, static_cast<GLsizeiptr>(width) * slice_rows_ * 4, nullptr, GL_DYNAMIC_DRAW);
+      glBufferData(GL_TEXTURE_BUFFER, static_cast<GLsizeiptr>(width) * (slice_rows_ + 1) * 4, nullptr, GL_DYNAMIC_DRAW);
       glBindTexture(GL_TEXTURE_BUFFER, buffer_textures_[i]);
       glTexBuffer(GL_TEXTURE_BUFFER, GL_RGBA8, buffers_[i]);
     }
@@ -170,7 +195,7 @@ bool GlPresenter::init(int width, int height) {
 bool GlPresenter::draw(const std::uint32_t* argb, int sw, int sh) {
   if (!program_ || !argb || sw <= 0 || sh <= 0) return false;
   synced_ = buffer_synced_ = false;
-  if (one_to_one(sw, sh)) {
+  if (buffered(sw, sh)) {
     upload_rows(argb, 0, height_);
   } else {
     glBindTexture(GL_TEXTURE_2D, texture_);
@@ -182,7 +207,7 @@ bool GlPresenter::draw(const std::uint32_t* argb, int sw, int sh) {
 bool GlPresenter::draw(const std::uint32_t* argb, std::span<const ERRect> damage, std::span<const DamageMove> moves,
                        int sw, int sh) {
   if (!program_ || !argb || sw <= 0 || sh <= 0) return false;
-  if (one_to_one(sw, sh)) {
+  if (buffered(sw, sh)) {
     synced_ = false;
     if (!buffer_synced_) {
       upload_rows(argb, 0, height_);
@@ -213,6 +238,8 @@ bool GlPresenter::draw(const std::uint32_t* argb, std::span<const ERRect> damage
 
 bool GlPresenter::one_to_one(int sw, int sh) const { return !buffer_textures_.empty() && sw == width_ && sh == height_; }
 
+bool GlPresenter::buffered(int sw, int sh) const { return one_to_one(sw, sh) || (!buffer_textures_.empty() && scaled_program_); }
+
 // The buffer holds whole framebuffer rows, so a move needs no GPU copy: the rows it wrote are uploaded
 // like damage. Close row ranges go up as one call.
 void GlPresenter::upload_changed_rows(const std::uint32_t* argb, std::span<const ERRect> damage,
@@ -234,7 +261,8 @@ void GlPresenter::upload_changed_rows(const std::uint32_t* argb, std::span<const
 void GlPresenter::upload_rows(const std::uint32_t* argb, int y0, int y1) {
   const GLsizeiptr row = static_cast<GLsizeiptr>(width_) * 4;
   for (int i = 0; i < int(buffers_.size()); ++i) {
-    const int first = i * slice_rows_, a = std::max(y0, first), b = std::min(y1, first + slice_rows_);
+    // A slice's buffer also holds the next slice's first row.
+    const int first = i * slice_rows_, a = std::max(y0, first), b = std::min({y1, first + slice_rows_ + 1, height_});
     if (b <= a) continue;
     glBindBuffer(GL_TEXTURE_BUFFER, buffers_[i]);
     glBufferSubData(GL_TEXTURE_BUFFER, (a - first) * row, (b - a) * row, argb + static_cast<std::size_t>(a) * width_);
@@ -399,6 +427,31 @@ bool GlPresenter::present(int sw, int sh) {
   }
   glViewport((sw-vw)/2, (sh-vh)/2, vw, vh);
   if (layered) draw_layers((sw - vw) / 2, (sh - vh) / 2, vw, vh);
+  if (buffered(sw, sh)) {
+    const int vx = (sw - vw) / 2, vy = (sh - vh) / 2;
+    glBindVertexArray(vao_);
+    glUseProgram(scaled_program_);
+    glUniform1i(glGetUniformLocation(scaled_program_, "rows"), 0);
+    glUniform2i(glGetUniformLocation(scaled_program_, "size"), width_, height_);
+    glUniform4f(glGetUniformLocation(scaled_program_, "view"), float(vx), float(vy), float(vw), float(vh));
+    const GLint first = glGetUniformLocation(scaled_program_, "first"), count = glGetUniformLocation(scaled_program_, "count");
+    // Each slice's draw is cut to the window rows its framebuffer rows reach, one row of margin each way;
+    // the shader keeps exactly the fragments it owns.
+    glEnable(GL_SCISSOR_TEST);
+    for (int i = 0; i < int(buffer_textures_.size()); ++i) {
+      const int r0 = i * slice_rows_, r1 = std::min(r0 + slice_rows_, height_);
+      const int top = vy + vh - int(double(r0 - 1) * vh / height_), bottom = vy + vh - int(double(r1 + 1) * vh / height_ + 1);
+      glScissor(vx, std::max(bottom, vy), vw, std::min(top, vy + vh) - std::max(bottom, vy));
+      glBindTexture(GL_TEXTURE_BUFFER, buffer_textures_[i]);
+      glUniform1i(first, r0);
+      glUniform1i(count, r1 - r0);
+      glDrawArrays(GL_TRIANGLES, 0, 3);
+    }
+    glDisable(GL_SCISSOR_TEST);
+    glDisable(GL_BLEND);
+    glBindTexture(GL_TEXTURE_BUFFER, 0);
+    return glGetError() == GL_NO_ERROR;
+  }
   glBindVertexArray(vao_);
   glBindTexture(GL_TEXTURE_2D, texture_);
   glUseProgram(program_);
@@ -428,6 +481,8 @@ void GlPresenter::release() {
   layer_program_ = 0;
   if (buffer_program_) glDeleteProgram(buffer_program_);
   buffer_program_ = 0;
+  if (scaled_program_) glDeleteProgram(scaled_program_);
+  scaled_program_ = 0;
   if (texture_) glDeleteTextures(1, &texture_);
   if (scratch_) glDeleteTextures(1, &scratch_);
   if (read_fbo_) glDeleteFramebuffers(1, &read_fbo_);

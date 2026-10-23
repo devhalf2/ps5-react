@@ -118,6 +118,10 @@ keeps `letterSpacing` in 1/64 px and runs the bitmap text path's advances,
 pens and widths in 26.6 fixed point, so a fraction of a pixel of spacing adds
 up along a line. ps5-react's shaper (`native/shared/text_shaper.cpp`) reads the
 same unit.
+`embeddedReact-4k-fps.patch` (Apache-2.0 compositor and tests; not yet proposed
+upstream) scrolls a ScrollView by copy over a layer image that covers its
+viewport, and lets the render workers capture the fade cache together, each its
+own rows, instead of rendering a single-core frame for it.
 Patches apply in the order the lock lists them, and may add files.
 
 `tools/bundle.mjs` adapts upstream Apache-2.0 tooling and preserves its notice.
