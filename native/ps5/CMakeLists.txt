@@ -33,11 +33,13 @@ set(ERUI_XFORM_CACHE_SLOTS 2 CACHE STRING "" FORCE)
 set(ERUI_MAX_ANIM_VALUES 1024 CACHE STRING "" FORCE)
 set(ERUI_MAX_VALUE_BINDINGS 8 CACHE STRING "" FORCE)
 # Photos are baked at half size and scaled bilinearly. The scaler and gradient assemble rows of up to
-# 2560 px (+7 KB per worker each over 800 px) and render wider ones in chunks. 256 image slots cost
-# +11 KB at 88 B per slot.
+# 2560 px (+7 KB per worker each over 800 px) and render wider ones in chunks. The image registry holds
+# every decoded image: the cache's up to 256 (image_loader.cpp kCacheEntries, in use or not) plus the
+# app's baked ones. At 256 slots, a cache of small images left none for the rest and new images were
+# discarded ("the engine image registry is full"). 512 slots cost 45 KB at 88 B per slot.
 set(ERUI_BILINEAR_SCALE ON CACHE BOOL "" FORCE)
 set(ERUI_MAX_IMG_ROW_PIXELS 2560 CACHE STRING "" FORCE)
-set(ERUI_IMAGE_REGISTRY_MAX 256 CACHE STRING "" FORCE)
+set(ERUI_IMAGE_REGISTRY_MAX 512 CACHE STRING "" FORCE)
 # View backgroundGradient (linear and radial; also <Svg> gradient fills): about 5 KB of code, an 8 KB
 # colour ramp and a 10 KB row per render worker; nodes without a gradient pay nothing per frame.
 set(ERUI_GRADIENT ON CACHE BOOL "" FORCE)
@@ -56,6 +58,14 @@ set(ERUI_PERF_STATS ON CACHE BOOL "" FORCE)
 # fit at once; the bridge needs a handle per node. Node creation fails silently past this. The damage
 # pre-pass and the dirty-flag sweep walk the whole pool on every commit.
 set(ERUI_MAX_NODES 4096 CACHE STRING "" FORCE)
+# The fade cache: while a translucent group's content is unchanged between frames (a pure opacity
+# fade), the engine blends one copy of it captured on the first frame instead of re-rendering and
+# re-compositing the subtree every frame. One 1920x1080 slot, 8.3 MB of .bss, so a full-screen fade
+# (an app darkening its whole screen between pages) costs a blend per frame at 1080p; a group larger
+# than the slot (a full screen at 2160p) takes the strip path. Any content change inside the group
+# drops the copy and that frame takes the strip path as before.
+set(ERUI_FADE_CACHE_W 1920 CACHE STRING "" FORCE)
+set(ERUI_FADE_CACHE_H 1080 CACHE STRING "" FORCE)
 foreach(FEATURE SMOKE RUNTEST SPLITTEST GCTEST COMPILE)
   set(ER_BRIDGE_QUICKJS_${FEATURE} OFF CACHE BOOL "" FORCE)
 endforeach()

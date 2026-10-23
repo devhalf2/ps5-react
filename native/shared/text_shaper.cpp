@@ -11,6 +11,7 @@
 #include "host_api.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <climits>
 #include <cstdint>
 #include <cstdio>
@@ -45,12 +46,13 @@ struct FaceSpec {
 constexpr FaceSpec kFaces[] = {
     {"NotoSansJP-Regular.otf", Script::kKana, 880, 120, false},
     {"NotoSansSC-Regular.otf", Script::kHan, 880, 120, false},
+    {"NotoSansTC-Regular.otf", Script::kHan, 880, 120, false},
     {"NotoSansDevanagari-Regular.ttf", Script::kDevanagari, 1000, 450, true},
     {"NotoSansBengali-Regular.ttf", Script::kBengali, 1000, 450, true},
     {"NotoSansArabic-Regular.ttf", Script::kArabic, 1050, 500, true},
 };
 constexpr int kFaceCount = sizeof kFaces / sizeof kFaces[0];
-constexpr int kJapanese = 0, kChinese = 1;
+constexpr int kJapanese = 0, kChinese = 1, kTraditional = 2;
 
 struct Face {
   bool present = false, failed = false;
@@ -65,7 +67,7 @@ struct State {
   Face faces[kFaceCount];
   bool any_face = false;
   hb_language_t language = nullptr;
-  bool prefer_japanese = false;
+  bool prefer_japanese = false, prefer_traditional = false;
   unsigned serial = 0;
   hb_buffer_t* buffer = nullptr;
   hb_raster_draw_t* raster = nullptr;
@@ -228,9 +230,14 @@ int face_for(std::uint32_t cp, int previous) {
   int count = 0;
   const Script script = script_of(cp);
   if (script == Script::kHan || script == Script::kKana) {
+    // Han in the language's own forms first; a character its font lacks takes the nearest one that
+    // has it (simplified and traditional Chinese share most characters, then Japanese kanji).
     const bool japanese = script == Script::kKana || state->prefer_japanese;
-    order[count++] = japanese ? kJapanese : kChinese;
-    order[count++] = japanese ? kChinese : kJapanese;
+    const bool traditional = state->prefer_traditional && !japanese;
+    if (japanese) order[count++] = kJapanese;
+    order[count++] = traditional ? kTraditional : kChinese;
+    order[count++] = traditional ? kChinese : kTraditional;
+    if (!japanese) order[count++] = kJapanese;
   } else if (script != Script::kOther) {
     for (int i = 0; i < kFaceCount; i++)
       if (kFaces[i].script == script) order[count++] = i;
@@ -363,7 +370,7 @@ enum : std::uint8_t { kClusterStart = 1, kBreakBefore = 2, kSpace = 4, kNewline 
 
 struct Layout {
   std::string text, family;
-  int px = 0, letter_spacing = 0, bold = 0, direction = 0;
+  int px = 0, letter_spacing = 0, bold = 0, direction = 0;  // letter_spacing in 1/64 px, as the engine's
   unsigned serial = 0;
   const BitmapFont* baked = nullptr;
   std::vector<Glyph> glyphs;
@@ -453,8 +460,8 @@ void shape(Layout& layout) {
           layout.glyphs.push_back({cp, 0, 0, 0, cluster, -1});
           continue;
         }
-        const int advance = font_glyph(layout.baked, cp)->advance + layout.letter_spacing + layout.bold;
-        layout.glyphs.push_back({cp, advance * 64, 0, 0, cluster, -1});
+        const int advance = (font_glyph(layout.baked, cp)->advance + layout.bold) * 64 + layout.letter_spacing;
+        layout.glyphs.push_back({cp, advance, 0, 0, cluster, -1});
       }
     } else {
       hb_buffer_t* buffer = state->buffer;
@@ -467,7 +474,7 @@ void shape(Layout& layout) {
       unsigned count = 0;
       const hb_glyph_info_t* info = hb_buffer_get_glyph_infos(buffer, &count);
       const hb_glyph_position_t* position = hb_buffer_get_glyph_positions(buffer, nullptr);
-      const int extra = kFaces[run.face].joined ? 0 : (layout.letter_spacing + layout.bold) * 64;
+      const int extra = kFaces[run.face].joined ? 0 : layout.letter_spacing + layout.bold * 64;
       for (unsigned i = 0; i < count; i++) {
         const bool first_of_cluster = i == 0 || info[i].cluster != info[i - 1].cluster;
         layout.glyphs.push_back({info[i].codepoint, position[i].x_advance + (first_of_cluster ? extra : 0),
@@ -636,6 +643,8 @@ Style style_at(const ERTextRenderParams* params, const std::uint8_t* span_map, s
 }
 
 void draw_glyph(const Layout& layout, const Glyph& g, int x, int line_top, const ERRect& clip, const Style& style) {
+  // A line feed or an invisible mark is in the baked run with no width: nothing to draw.
+  if (g.face < 0 && (g.id == '\n' || ignorable(g.id))) return;
   for (int pass = 0; pass < (style.bold ? 2 : 1); pass++) {
     if (g.face < 0) {
       er_text_draw_glyph(layout.baked, g.id, x + pass, line_top + layout.ascent - layout.baked->baseline, &clip,
@@ -693,7 +702,8 @@ void render(const ERTextRenderParams* params, const char* text, const std::uint8
   const bool ellipsis = truncated && params->ellipsize_mode != ER_TEXT_ELLIPSIZE_CLIP;
   const std::uint32_t ellipsis_cp = baked_has(layout.baked, 0x2026) ? 0x2026 : '.';
   const int ellipsis_count = ellipsis_cp == 0x2026 ? 1 : 3;
-  const int ellipsis_w = ellipsis_count * (font_glyph(layout.baked, ellipsis_cp)->advance + layout.letter_spacing + layout.bold);
+  const std::int32_t ellipsis_advance = (font_glyph(layout.baked, ellipsis_cp)->advance + layout.bold) * 64 + layout.letter_spacing;
+  const int ellipsis_w = to_px(ellipsis_count * ellipsis_advance);
 
   for (std::size_t i = 0; i < lines.size(); i++) {
     const int line_top = clip.y + static_cast<int>(i) * line_height;
@@ -732,7 +742,7 @@ void render(const ERTextRenderParams* params, const char* text, const std::uint8
     auto draw_ellipsis = [&](std::int32_t& pen) {
       for (int k = 0; k < ellipsis_count; k++) {
         draw_glyph(layout, Glyph{ellipsis_cp, 0, 0, 0, 0, -1}, (pen + 32) >> 6, line_top, clip, base);
-        pen += (font_glyph(layout.baked, ellipsis_cp)->advance + layout.letter_spacing + layout.bold) * 64;
+        pen += ellipsis_advance;
       }
     };
     std::int32_t pen = x * 64;
@@ -774,6 +784,9 @@ bool claims(const char* text, const char* family, std::uint8_t font_size, std::u
       continue;
     }
     const std::uint32_t cp = next_codepoint(text, length, at);
+    // Bidi marks and isolates (LRM, RLM, embeddings, LRI...PDI) only the shaper drops: the baked path
+    // would draw them as a missing glyph.
+    if (cp == 0x200E || cp == 0x200F || (cp >= 0x202A && cp <= 0x202E) || (cp >= 0x2066 && cp <= 0x2069)) return true;
     if (ignorable(cp)) continue;
     if (needs_shaping(cp)) return true;
     if (!baked) baked = er_text_font(family, font_size);
@@ -856,6 +869,11 @@ void set_language(const char* tag) {
   if (!state) return;
   state->language = hb_language_from_string(tag, -1);
   state->prefer_japanese = std::strncmp(tag, "ja", 2) == 0 && (tag[2] == '\0' || tag[2] == '-');
+  // zh-Hant, and the regions that write it when the tag names no script: Taiwan, Hong Kong, Macau.
+  std::string lower(tag);
+  for (char& c : lower) c = c == '_' ? '-' : static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  const auto has = [&](const char* part) { return (lower + "-").find(std::string("-") + part + "-") != std::string::npos; };
+  state->prefer_traditional = lower.rfind("zh-", 0) == 0 && !has("hans") && (has("hant") || has("tw") || has("hk") || has("mo"));
   state->serial++;
 }
 

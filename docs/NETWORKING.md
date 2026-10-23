@@ -76,7 +76,7 @@ task during cleanup if its lifetime belongs to that component.
 | --- | --- | --- |
 | `connections` | 8 | Integer 1–64; maximum ranges in flight |
 | `mirrors` | omitted | Up to 4 other http(s) URLs for the same file. Each is probed and kept only if its size and strong ETag match the primary (or a `sha256` is given); ranges then rotate over the primary and the mirrors, and a mirror that fails a range is dropped. Not combined with `pieces` |
-| `adaptive` | `true` | Per-origin congestion window (AIMD) under `connections`: starts at up to 8 and grows by half each second while full and healthy; HTTP 5xx/429/408 or a broken connection halves it (Retry-After also pauses that origin), after which it grows by one a second. `false` keeps `connections` fixed |
+| `adaptive` | `true` | Per-origin congestion window (AIMD) under `connections`: starts at up to 8 and grows by half each second while full and healthy; HTTP 5xx/408 or a broken connection halves it, after which it grows by one a second. HTTP 503/429 caps the origin instead (below). `false` keeps `connections` fixed |
 | `rangeBytes` | 32 MiB | Integer 1–256 MiB; at most 65,536 ranges |
 | `resume` | `true` | Reuses matching durable completed ranges; `false` refuses existing partial files |
 | `rejectHtml` | `false` | Rejects HTML content types and initial HTML signatures before a file can be published; provider pages are not binary downloads |
@@ -190,12 +190,19 @@ second of writes to the open file before detection; it never redirects those
 writes to another storage root. Apps still need to check free space and actual
 mounted external roots before submission. Write failures preserve partial data.
 
-Snapshots contain `state`, `received`, `written`, `total` (bytes or `null`),
+Snapshots contain `state`, `received`, `written`, `completedBytes`, `total` (bytes or `null`),
 `bytesPerSecond`, `connections`, `retries`, `bufferedBytes`, `status`, `id`,
 `destination` and `error`. States are `queued`, `connecting`, `downloading`,
 `verifying`, `completed`, `failed`, and `cancelled`. Progress is sampled and
 polled every 250 ms; retrying a range can reduce progress. `written` is completed
 ranges plus bytes written in current ranges, not bytes already checkpointed.
+`completedBytes` counts only whole completed ranges, the bytes a checkpoint keeps:
+it never goes down within a task, and a resumed task's first `downloading`
+snapshot already holds what the paused one had, so a progress bar that follows it
+does not step back across pause and resume (the cut ranges download again behind
+it). Without range support nothing resumes and it follows `written`. While a
+resumed task is still `connecting`, before its checkpoint is read, it is 0; keep
+the last value shown until the task reaches `downloading`.
 `connections` includes ranges draining to disk, rather than an exact socket count.
 
 ## Bounded HTTP requests
@@ -253,6 +260,16 @@ file: a range retries up to eight total attempts (a probe six), with exponential
 delay from 0.5 s to 30 s, jitter, and numeric Retry-After honored up to a minute.
 HTTP-date Retry-After is not supported. Each failed range logs its status,
 Content-Range, Content-Length, ETag, encoding and final URL.
+
+With `adaptive`, an HTTP 503 or 429 opens an overload episode on its origin that
+lasts the response's Retry-After (1 to 60 s). The origin is capped at the number of
+connections that were streaming at that moment, and they keep going. The failed range
+retries after Retry-After, without spending an attempt while other ranges stream.
+Answers to requests sent before the episode began change nothing. New requests wait
+out the episode only when nothing was streaming, or when a request sent at the
+capped count is turned away too. The cap rises by one connection a minute once a
+minute has passed without an episode. The log names the origin, the Retry-After,
+and the cap.
 The default concurrency is a starting point, not a measured PS5 optimum.
 
 The FIFO queue accepts eight unconsumed tasks, with **one task active at a time**;

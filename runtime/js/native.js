@@ -23,9 +23,10 @@ function host() {
  * @typedef {{id: number, name: string}} User
  * @typedef {{model: string | null, firmware: string | null, cpuTemperature: number | null,
  *   socTemperature: number | null, cpuFrequency: number | null, freeMemory: number | null,
- *   processTime: number | null, language: string | null}} Device
+ *   processTime: number | null, language: string | null, consoleId: string | null}} Device
  *   Temperatures in °C, frequency in Hz, memory in bytes, process time in µs; language is the
- *   system language as a BCP 47 tag ('en-US', 'pt-BR', 'zh-Hans').
+ *   system language as a BCP 47 tag ('en-US', 'pt-BR', 'zh-Hans'); consoleId is the console's
+ *   OpenPSID as 32 lowercase hex digits, fixed per console (the preview's comes from PS5_REACT_CONSOLE_ID).
  * @typedef {'up' | 'down' | 'left' | 'right' | 'cross' | 'circle' | 'triangle' | 'square' | 'l1' | 'r1'
  *   | 'l2' | 'r2' | 'l3' | 'r3' | 'options' | 'touchpad'} Button
  * @typedef {{connected: boolean, leftX: number, leftY: number, rightX: number, rightY: number,
@@ -66,8 +67,9 @@ export const FileSystem = {
   exists: path => host().fs.stat(path) !== null,
   /** UTF-8, at most 8 MiB. @param {string} path @returns {string} */
   readFile: path => host().fs.readFile(path),
-  /** @param {string} path @param {string} text */
-  writeFile: (path, text) => host().fs.writeFile(path, text, false),
+  /** `sync` waits until the text is on the disk, for a file saved then renamed into place.
+   * @param {string} path @param {string} text @param {{sync?: boolean}} [options] */
+  writeFile: (path, text, {sync = false} = {}) => host().fs.writeFile(path, text, false, sync),
   /** @param {string} path @param {string} text */
   appendFile: (path, text) => host().fs.writeFile(path, text, true),
   /** @param {string} path @param {{recursive?: boolean}} [options] */
@@ -77,6 +79,10 @@ export const FileSystem = {
   /** Removes a file, or a directory with everything in it, without following symbolic links.
    * Synchronous: meant for small app-owned trees. @param {string} path */
   removeTree: path => host().fs.removeTree(path),
+  /** Removes as `removeTree` does, on a worker thread, in the order asked. Resolves once the path is
+   * gone, or if it never existed; rejects with an Error naming the path and the system error.
+   * @param {string} path @returns {Promise<void>} */
+  removeAsync: async path => { await networkTask(host().fs.removeAsync(path), 'fs.removeAsync', path, 'removals').done; },
   /** @param {string} from @param {string} to */
   rename: (from, to) => host().fs.rename(from, to),
   /** Sets a file's or directory's permission bits, such as 0o777. */
@@ -284,7 +290,7 @@ function pollNetwork() {
 function networkTask(id, call, destination = '', backend = 'network') {
   const key = `${backend}:${id}`;
   const task = {id, backend, call, destination, listeners: new Set(),
-    snapshot: Object.freeze({id, destination, state: 'queued', received: 0, written: 0, total: null,
+    snapshot: Object.freeze({id, destination, state: 'queued', received: 0, written: 0, completedBytes: 0, total: null,
       bytesPerSecond: 0, connections: 0, retries: 0, bufferedBytes: 0})};
   const done = new Promise((resolve, reject) => { task.resolve = resolve; task.reject = reject; });
   // A task can be observed through subscriptions without awaiting its completion.
@@ -345,16 +351,23 @@ export const Downloads = {
 
 /** Streaming archive extraction off-thread; source volumes are preserved on failure/cancel. */
 export const Archives = Object.freeze({
-  extract({sources, destination, maxBytes = 1024**4, password}) {
+  /** `stream: true` starts a RAR set while its later volumes still download: only the first must exist;
+   * each next one is read once a file appears under its final name (write volumes elsewhere and rename). */
+  extract({sources, destination, maxBytes = 1024**4, password, stream = false}) {
     if (password != null && (typeof password !== 'string' || password.length > 1024 || password.includes('\0')))
       throw new TypeError('Archives.extract: password must be a string without NUL, at most 1024 UTF-8 bytes.');
-    const id = host().archives.extract(sources, destination, maxBytes, password ?? '');
+    const id = host().archives.extract(sources, destination, maxBytes, password ?? '', stream === true);
     return networkTask(id, 'Archives.extract', destination, 'archives');
   },
   /** What the files' leading bytes are, and why their headers so far already rule out extraction.
-   * Reads a few headers synchronously; also works on a download's growing `.part` file.
-   * @param {string[]} sources ordered volumes @returns {{kind: string, refusal: string}} */
+   * Reads headers on a worker: a RAR's first file header, then more for about 100 ms and one header past it.
+   * Returns within about 25 ms; when the drive is slower, `pending` is true, the result is the previous answer
+   * for these sources (empty strings when none), and a later call returns the finished read.
+   * Also works on a download's growing `.part` file.
+   * @param {string[]} sources ordered volumes @returns {{kind: string, refusal: string, pending?: true}} */
   inspect: sources => host().archives.inspect(sources),
+  /** Whether `extract` takes `stream`. */
+  streams: true,
 });
 
 /**

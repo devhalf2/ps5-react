@@ -117,6 +117,11 @@ function Anchor({inner, props, forwardedRef}) {
     return created;
   });
   anchor.props = props;
+  // A snapping ScrollView lands on its anchors' starts.
+  useLayoutEffect(() => {
+    frame?.anchors.add(anchor);
+    return () => { frame?.anchors.delete(anchor); };
+  }, []);
   const {scrollAnchor, ...rest} = props;
   return createElement(AnchorContext.Provider, {value: anchor},
     createElement(inner, {...rest, ref: forwardedRef, onLayout: anchor.onLayout}));

@@ -66,7 +66,7 @@ The input protocol is versioned on its own; it is not the native API's ABI
 version ([NATIVE-API.md](NATIVE-API.md#contract)).
 `globalThis.__ps5ReactDispatch(action)` receives `up`, `down`, `left`, `right`
 (the D-pad and the left stick, with the platform's hold-to-repeat), `confirm`,
-`back`, and, since input protocol v3, `l1`, `r1`, `l2`, `r2`, `triangle`, and `square`
+`back`, and, since input protocol v3, `l1`, `r1`, `l2`, `r2`, `triangle`, `square`, and `options`
 (one action per press, no repeat). For input protocol v1 compatibility the runtime also
 delivers `previous` (after `up`/`left`) and `next` (after `down`/`right`) to
 `useController` handlers only. Options/Escape still exit. Both hosts and input
@@ -90,7 +90,8 @@ frames.
 | `l1`, `r1` | Q, E | L1, R1 |
 | `l2`, `r2` | Z, C | L2, R2 (past half travel on the desktop) |
 | `triangle`, `square` | T, F | Triangle, Square |
-| Exit (handled by the host) | Escape | Options |
+| `options` | O | Options (Start) |
+| Exit (handled by the host) | Escape | (the PS button) |
 
 ## Focusable elements
 
@@ -151,7 +152,7 @@ express the order you want, and use `nextFocus*` only for exceptions.
 | `wrap` | Moving past the last element in a direction wraps to the first in that row/column; with nothing in that row/column (Down from a tab row), focus leaves the scope as usual unless it traps |
 | `restoreFocus` | Re-entering the scope focuses the element focused when it was left (default `true`) |
 | `onBack` | Handles Circle while focus is inside; return `true` to consume |
-| `onAction` | `(action) => boolean`: handles `l1`, `r1`, `l2`, `r2`, `triangle`, and `square` while focus is inside, innermost scope first; return `true` to consume |
+| `onAction` | `(action) => boolean`: handles `l1`, `r1`, `l2`, `r2`, `triangle`, `square`, and `options` while focus is inside, innermost scope first; return `true` to consume |
 | `focusKey` | Name for `focus(key)` on the scope (focuses its remembered element) |
 | `inert` | Takes the scope's subtree out of navigation while true: no candidates, no `autoFocus`, no `focus(key)`; focus inside moves out after the commit |
 
@@ -173,6 +174,8 @@ needs ([IMAGES.md](IMAGES.md)).
   custom components; spread `focusProps` on a host element.
 - `useFocus()` → `{focusedKey, focus(key), blur()}`.
 - `useIsFocused()` inside a focusable subtree → boolean of the nearest focusable ancestor.
+- `useIsScrolling()` → whether an enclosing `ScrollView` is focus scrolling; see
+  [Hiding focus while a view scrolls](#hiding-focus-while-a-view-scrolls).
 - `BackHandler.addEventListener('hardwareBackPress', fn)` → `{remove()}`; `fn`
   returning `true` consumes Circle. Order: each enclosing `FocusScope.onBack`,
   innermost first, until one returns `true`; then listeners (last added first).
@@ -197,7 +200,7 @@ It never re-renders its component, so call it once near the root.
 | `{type: 'blocked', direction}` | Nothing to move to: an edge, a trap, or no focusable element |
 | `{type: 'press', handled}` | Cross on the focused element; `handled` when it is enabled and has `onPress` (no event without focus) |
 | `{type: 'back', handled}` | Circle; `handled` when an `onBack` or `BackHandler` listener consumed it |
-| `{type: 'action', action, handled}` | L1, R1, L2, R2, Triangle or Square; `handled` when an `onAction` returned `true` |
+| `{type: 'action', action, handled}` | L1, R1, L2, R2, Triangle, Square or Options; `handled` when an `onAction` returned `true` |
 
 Held directions repeat, so `move` arrives on every repeat. `FocusManager.move`
 and `press` report the same outcomes (`true`/`false`, `null` for a press
@@ -206,13 +209,26 @@ without focus) to code that drives the manager directly.
 ## ScrollView
 
 A `ScrollView` scrolls its focused descendant into view (minimal movement with a
-margin) through the native scroll offset, stepped once per presented frame in whole
+margin, 32 logical px on each edge unless [`revealInsets`](#reveal-insets-and-row-snapping) sets it) through the native scroll offset, stepped once per presented frame in whole
 pixels: it speeds up over four frames to at most 40 logical px per frame and
 brakes to stop exactly on the target, with no slow tail. A held key scrolls at that
 steady speed, and a new target mid-scroll keeps the current speed. When focus
 moves faster than that (a held key over tall rows) and the target gets more than
 a third of the viewport ahead, the cap rises by a quarter of the excess, so the
 screen follows focus instead of falling ever further behind.
+
+`scrollMotion="ease-out"` gives focus scrolling the PS5 Store's feel instead: a
+quartic ease-out over 240 ms from where the view is to the target, by the time each
+frame advances (so a 120 Hz display keeps the same timing): 25% after one 60 Hz
+frame, 45% after two, 73% after four, 99% after ten, on the target in whole pixels
+after twelve (200 ms), with no overshoot. A new target mid-scroll starts a new 240 ms
+from where the view is. A nested `ScrollView` without the prop inherits its enclosing one's, so setting
+it on a page's `ScrollView` covers the rails inside.
+
+- The first frames move the furthest (about 150 logical px of a 420 px row), so
+  the engine rasterizes a wider strip then than at the steady default.
+- A held key no longer scrolls at one steady speed: each step starts fast and
+  settles.
 
 ```jsx
 <ScrollView className="flex-1 gap-1">
@@ -224,6 +240,10 @@ screen follows focus instead of falling ever further behind.
   ))}
 </ScrollView>
 ```
+
+An element that takes focus before its first layout (the first tile of a grid
+mounted with focus sent to it) is revealed when it is laid out, if it still has
+focus then.
 
 Render the whole list and let the `ScrollView` follow focus instead of slicing
 a window of rows around a focus index. Give it a bounded height (`flex-1` in a
@@ -239,7 +259,7 @@ Minimal movement reveals only the focused element: focusing a card in a
 horizontal rail below a section title can leave the title cut off. Mark the
 section with `scrollAnchor` (on a `View` or `Pressable`; keep it constant for
 the element's lifetime) and a vertical `ScrollView` aligns the section's top to
-the viewport top plus the margin instead, whichever element inside it takes focus:
+the viewport top plus the top margin instead, whichever element inside it takes focus:
 
 ```jsx
 <ScrollView className="flex-1" onScrollTarget={({y}) => setHeaderHidden(y > heroHeight)}>
@@ -265,11 +285,78 @@ the viewport top plus the margin instead, whichever element inside it takes focu
   `ScrollView`s and the x axis always move the least.
 - An element can be its own anchor (`<View scrollAnchor focusable>`).
 
+### Hiding focus while a view scrolls
+
+`useIsScrolling()` is true while the `ScrollView` around the caller, or one
+around that, is focus scrolling: from the focus move that starts a scroll until
+the view rests on its target. It re-renders its component only when that
+changes, and is false outside any `ScrollView`. Touch scrolling does not count.
+The PS5 Store draws no focus ring while a rail scrolls; call it in the ring:
+
+```jsx
+function Ring() {
+  const scrolling = useIsScrolling();
+  return scrolling ? null : <View className="absolute -inset-1 border-2 border-white" />;
+}
+```
+
 `onScrollTarget({x, y})` on a `ScrollView` reports the offset it scrolls to on
 focus, once per new target when the scroll starts (and again if the content
 shrank and the scroll settled short of it). Touch scrolling does not call it;
 use `onScroll` for the live offset. Offsets are render pixels, like layout
 rectangles.
+
+### Reveal insets and row snapping
+
+`revealInsets={{top, bottom, left, right}}` sets the room a `ScrollView` keeps
+between the focused element and each edge of its viewport, in logical px; an
+edge left out keeps 32. Use it when something overlays the scroll view's edge,
+such as a button legend over the bottom of the screen: run the list to the
+screen's bottom and inset that edge by the overlay's height plus some room,
+and the focused row stops above the overlay while the rows past it scroll
+underneath.
+
+```jsx
+<ScrollView className="flex-1" revealInsets={{bottom: 65}}>…rows…</ScrollView>
+```
+
+- A `scrollAnchor` aligns its start `top` px below the viewport top. With an
+  explicit `bottom`, it aligns only if the focused element then ends `bottom`
+  px above the viewport's bottom; otherwise the view moves the least.
+- The insets apply to focus scrolling only. To let the last row clear an
+  overlay at the end of the content, give the content that much padding too
+  (`pb-*`): the offset is clamped to the content.
+
+`revealSnap` makes a list stop on whole rows: mark each row `scrollAnchor`, and
+focus scrolling puts a row's start `top` px below the viewport top (or the
+content's top at the viewport top), taking the row nearest the least movement
+that still shows the focused row whole. Rows may differ in height. Only row
+starts count, never the end of the row before or a gap between sections, so the
+top of the view is always a row's own top.
+
+```jsx
+<ScrollView className="h-[392px]" revealSnap revealInsets={{top: 4, bottom: 4}}>
+  <View className="py-1">
+    {options.map(option => <View key={option.id} scrollAnchor>{option.element /* 48 px */}</View>)}
+  </View>
+</ScrollView>
+```
+
+- In a snapping `ScrollView` the focused element's `scrollAnchor` is its row:
+  a button inside a taller card reveals the whole card, which is not aligned
+  to the top as an anchor otherwise is.
+- Every `scrollAnchor` directly inside the `ScrollView` (not inside a nested
+  one) is a place to land, the outer one of nested anchors included. To keep a
+  section heading with its first row, put both in that row's anchor.
+- With `revealInsets` of the rows' overhang (a focus ring) and a viewport a
+  whole number of rows tall, only whole rows ever show.
+- When no row start shows the focused row whole (a row taller than the
+  viewport), the view moves the least, as without snapping. Only the scrolling
+  axis snaps, and the offset is clamped to the content.
+- Near the end, the row start it lands on can lie past the last offset, and
+  clamping it cuts the top row. Pad the content's end by the bottom inset plus
+  the tallest row: the view never scrolls further than a row start needs, so
+  at most the inset and part of a row of that padding ever shows.
 
 ## Tailwind and motion integration
 

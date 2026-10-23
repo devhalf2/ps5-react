@@ -3,19 +3,31 @@
 // Additional attribution term: see LICENSE-ATTRIBUTION.
 #include "archive_preflight.hpp"
 #include "archives.hpp"
+#include "thread_name.hpp"
+#include "worker_thread.hpp"
 #include <lzma.h>
 #include <algorithm>
 #include <array>
 #include <cerrno>
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <fcntl.h>
+#include <map>
+#include <mutex>
 #include <string_view>
+#include <thread>
 #include <sys/stat.h>
 #include <unistd.h>
 
 namespace archives {
+// A RAR's headers sit between its files' data, each a disk read of its own, and inspect() runs on the
+// render thread: walking thousands of them while a download filled the drive held a tester's screen
+// for over 40 s.
+std::chrono::milliseconds inspect_budget{100};
 namespace {
 // libarchive sizes its decoder windows from the archive and has no memory limit option, while the title
 // shares one heap (128 MiB on a console that leaves little flexible memory) and a failed allocation
@@ -27,9 +39,17 @@ constexpr std::uint64_t max_decoder_memory = 64ULL * 1024 * 1024;
 constexpr std::uint64_t mib = 1024 * 1024;
 constexpr std::uint64_t unbounded = UINT64_MAX;
 constexpr unsigned max_coders = 64;
+// A 7z's encoded header decodes to its file list: a game's thousands of files take more than the other
+// metadata limit (MyLuxy/overdrive 0e7112e, ElijaOwO).
+constexpr std::uint64_t max_7z_header_bytes = 32ULL * 1024 * 1024;
 const std::string too_much_memory = "This archive needs more memory to extract than the console app can use.";
 const std::string malformed = "Unsupported or incomplete archive.";
 const std::string too_many_entries = "Archive has too many entries.";
+// A partial walk always reaches the first file header, then stops at the first header it starts past
+// the budget.
+bool within(bool partial, bool file_seen, std::chrono::steady_clock::time_point deadline) {
+  return !partial || !file_seen || std::chrono::steady_clock::now() < deadline;
+}
 
 std::uint64_t little_endian(const unsigned char* bytes, unsigned count) {
   std::uint64_t value = 0;
@@ -422,13 +442,13 @@ bool unpack_header(Volumes& in, Cursor& cursor, std::vector<unsigned char>& head
   if (!(refusal = fits(folder_memory(item, streams, in))).empty()) return false;
   const auto packed_size = streams.pack_sizes[0];
   const auto unpacked_size = item.sizes[0];
-  if (packed_size > max_metadata_bytes || unpacked_size > max_metadata_bytes) return false;
+  if (packed_size > max_metadata_bytes || unpacked_size > max_7z_header_bytes) return false;
   std::vector<unsigned char> packed(packed_size);
   header.assign(unpacked_size, 0);
   return in.read(signature_size + streams.pack_position, packed.data(), packed.size()) && decode_header(coder, packed, header);
 }
 
-std::string check(Volumes& in) {
+std::string check(Volumes& in, std::uint64_t& declared) {
   std::array<unsigned char, signature_size> signature{};
   if (!in.read(0, signature.data(), signature.size())) return malformed;
   const auto offset = little_endian(signature.data() + 12, 8);
@@ -466,6 +486,7 @@ std::string check(Volumes& in) {
   if (!cursor.ok) return malformed;
   std::uint64_t memory = 0;
   for (const auto& item : main.folders) memory = std::max(memory, folder_memory(item, main, in));
+  declared = memory;
   return fits(memory);
 }
 }
@@ -477,8 +498,9 @@ enum : std::uint64_t { file = 2, service = 3, encryption = 4, end = 5 };
 
 std::string check(Volumes& in, bool partial) {
   std::uint64_t at = signature.size(), memory = 0;
-  // A partial download stops at its first hole or at a bounded number of headers.
-  for (unsigned headers = 0; !partial || headers < 4096; ++headers) {
+  // A partial download stops at its first hole or at the walk's budget.
+  bool file_seen = false;
+  for (const auto deadline = std::chrono::steady_clock::now() + inspect_budget; within(partial, file_seen, deadline);) {
     std::array<unsigned char, 7> prefix{};
     const auto available = std::min<std::uint64_t>(prefix.size(), in.size() - std::min(at, in.size()));
     if (available < 5 || !in.read(at, prefix.data(), available)) break;
@@ -505,6 +527,7 @@ std::string check(Volumes& in, bool partial) {
       // libarchive allocates both a window and an equally sized filter buffer for every compressed file.
       if (!(file_flags & 1) && method) memory = std::max(memory, 2 * (window_unit << ((compression >> 10) & 0x1F)));
     }
+    file_seen = file_seen || type == file;
     if (!cursor.ok) return partial ? fits(memory) : malformed;
     at = header_at + header_size;
     if (data_size > in.size() - std::min(at, in.size())) break;
@@ -533,7 +556,8 @@ constexpr unsigned stored = 0x30, ppmd_version = 29, ppmd_block = 0x80, ppmd_mem
 // Only blocks at the start of a non-solid file are seen; a PPMd block switched to later is not caught.
 std::string check(Volumes& in, bool partial) {
   std::uint64_t at = signature.size(), memory = 0;
-  for (unsigned headers = 0; !partial || headers < 4096; ++headers) {
+  bool file_seen = false;
+  for (const auto deadline = std::chrono::steady_clock::now() + inspect_budget; within(partial, file_seen, deadline);) {
     std::array<unsigned char, 32> header{};
     const auto available = std::min<std::uint64_t>(header.size(), in.size() - std::min(at, in.size()));
     if (available < 7 || !in.read(at, header.data(), available)) break;
@@ -557,6 +581,7 @@ std::string check(Volumes& in, bool partial) {
           (first[0] & ppmd_block) && (first[0] & ppmd_memory))
         memory = std::max<std::uint64_t>(memory, (first[1] + 1ULL) * mib);
     }
+    file_seen = file_seen || type == file;
     if (size + data > in.size() - std::min(at, in.size())) break;
     at += size + data;
     if (type == end) {
@@ -664,12 +689,18 @@ bool starts_with(const std::array<unsigned char, 8>& magic, std::string_view pre
 }
 
 std::string preflight(const std::vector<std::string>& sources) {
+  std::uint64_t seven_zip_memory = 0;
+  return preflight(sources, seven_zip_memory);
+}
+
+std::string preflight(const std::vector<std::string>& sources, std::uint64_t& seven_zip_memory) {
+  seven_zip_memory = 0;
   Volumes in(sources);
   std::array<unsigned char, 8> magic{};
   in.read(0, magic.data(), static_cast<std::size_t>(std::min<std::uint64_t>(magic.size(), in.size())));
   // libarchive searches executables for an embedded archive, which these checks do not follow.
   if (starts_with(magic, "MZ") || starts_with(magic, "\x7F" "ELF")) return "Self-extracting archives are not supported.";
-  if (starts_with(magic, "7z\xBC\xAF\x27\x1C")) return seven_zip::check(in);
+  if (starts_with(magic, "7z\xBC\xAF\x27\x1C")) return seven_zip::check(in, seven_zip_memory);
   if (starts_with(magic, rar5::signature)) return rar5::check(in, false);
   if (starts_with(magic, rar4::signature)) return rar4::check(in, false);
   // Compression around a TAR: only the outer layer is checked.
@@ -708,5 +739,92 @@ Inspection inspect(const std::vector<std::string>& sources) {
   if (starts_with(boot, "EXFAT   ")) return {"exfat", {}};
   if (little_endian(ufs.data(), 4) == 0x19540119) return {"ffpkg", {}};
   return {};
+}
+
+std::chrono::milliseconds inspect_delay{0};
+namespace {
+struct Answer { Inspection inspection; bool fresh = false; };
+// One worker reads for every caller, in request order. `answers` holds the latest result per set of
+// sources; `fresh` marks one no caller has received yet.
+struct Inspector {
+  std::mutex mutex;
+  std::condition_variable changed;
+  std::deque<std::vector<std::string>> queue;
+  std::vector<std::string> running;
+  std::map<std::vector<std::string>, Answer> answers;
+  bool started = false, stopping = false;
+  WorkerThread thread;
+} inspector;
+// Bounds the memory held for callers that never ask again.
+constexpr std::size_t max_answers = 64, max_queued = 16;
+
+void inspect_loop() {
+  name_thread("inspect");
+  std::unique_lock lock(inspector.mutex);
+  while (!inspector.stopping) {
+    if (inspector.queue.empty()) {
+      inspector.changed.wait(lock);
+      continue;
+    }
+    inspector.running = std::move(inspector.queue.front());
+    inspector.queue.pop_front();
+    lock.unlock();
+    if (inspect_delay.count()) std::this_thread::sleep_for(inspect_delay);
+    auto result = inspect(inspector.running);
+    lock.lock();
+    if (inspector.answers.size() >= max_answers) inspector.answers.clear();
+    inspector.answers[inspector.running] = {std::move(result), true};
+    inspector.running.clear();
+    inspector.changed.notify_all();
+  }
+}
+}
+
+PendingInspection inspect_soon(const std::vector<std::string>& sources, std::chrono::milliseconds wait) {
+  std::unique_lock lock(inspector.mutex);
+  if (!inspector.started) {
+    inspector.stopping = false;
+    // The parsers are shallow; xz and zstd header decoders want more than the console's default stack.
+    inspector.started = inspector.thread.start(inspect_loop, 1024 * 1024);
+    if (!inspector.started) {
+      lock.unlock();
+      return {inspect(sources), false};
+    }
+  }
+  const auto take = [&](PendingInspection& out) {
+    const auto found = inspector.answers.find(sources);
+    if (found == inspector.answers.end() || !found->second.fresh) return false;
+    found->second.fresh = false;
+    out = {found->second.inspection, false};
+    return true;
+  };
+  PendingInspection out;
+  if (take(out)) return out;
+  const bool queued = inspector.running == sources ||
+                      std::find(inspector.queue.begin(), inspector.queue.end(), sources) != inspector.queue.end();
+  if (!queued) {
+    if (inspector.queue.size() >= max_queued) inspector.queue.pop_front();
+    inspector.queue.push_back(sources);
+    inspector.changed.notify_all();
+  }
+  if (inspector.changed.wait_for(lock, wait, [&] { return take(out); })) return out;
+  const auto previous = inspector.answers.find(sources);
+  if (previous != inspector.answers.end()) out.inspection = previous->second.inspection;
+  out.pending = true;
+  return out;
+}
+
+void stop_inspections() {
+  {
+    std::lock_guard lock(inspector.mutex);
+    if (!inspector.started) return;
+    inspector.stopping = true;
+    inspector.changed.notify_all();
+  }
+  inspector.thread.join();
+  std::lock_guard lock(inspector.mutex);
+  inspector.started = false;
+  inspector.queue.clear();
+  inspector.answers.clear();
 }
 }

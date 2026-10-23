@@ -156,6 +156,13 @@ export function createCompiler({config = {}, renderWidth, renderHeight, appDir})
       style[key] = key === 'lineHeight' ? Math.round(value.em * fontSize)
         : Number((value.em * fontSize).toFixed(2));
     }
+    // theme.fontTracking: the spacing a face takes at a render size, where nothing sets it explicitly.
+    // The engine keeps letterSpacing in 1/64 px, so a fraction of a pixel adds up along the line.
+    if (style.letterSpacing === undefined && $tracking === undefined && context.$tracking === undefined &&
+        (style.fontSize !== undefined || style.fontFamily !== undefined)) {
+      const tracking = theme.fontTracking[style.fontFamily ?? context.fontFamily]?.[fontSize];
+      if (tracking !== undefined) style.letterSpacing = tracking;
+    }
     if ($transform) {
       const t = {...(fragment === context ? {} : context.$transform), ...$transform};
       style.transform = [

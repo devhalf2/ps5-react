@@ -25,6 +25,90 @@ constexpr std::size_t max_queued_files = 32;
 // Writer threads only hash and copy; the read-back buffer is on the heap.
 constexpr std::size_t thread_stack = 256 * 1024;
 }
+Receipt::~Receipt() { close(); }
+
+void Receipt::close() {
+  if (fd_ >= 0) ::close(fd_);
+  fd_ = -1;
+}
+
+bool Receipt::open(const std::string& path, const std::string& header) {
+  fd_ = ::open(path.c_str(), O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
+  if (fd_ < 0) return false;
+  path_ = path;
+  header_ = header.size();
+  buffer_.reserve(buffer_bytes);
+  buffer_ = header + "\n";
+  return true;
+}
+
+bool Receipt::flush() {
+  std::size_t offset = 0;
+  while (!failed_ && offset < buffer_.size()) {
+    const auto count = write(fd_, buffer_.data() + offset, buffer_.size() - offset);
+    if (count < 0 && errno == EINTR) continue;
+    if (count <= 0) failed_ = true;
+    else offset += count;
+  }
+  buffer_.clear();
+  return !failed_ && fd_ >= 0;
+}
+
+bool Receipt::add(const std::string& digest, const std::string& name) {
+  if (failed_ || fd_ < 0) return false;
+  if (buffer_.size() + digest.size() + name.size() + 2 > buffer_bytes && !flush()) return false;
+  buffer_ += digest;
+  buffer_ += '|';
+  buffer_ += name;
+  buffer_ += '\n';
+  ++files_;
+  return true;
+}
+
+bool Receipt::set_header(const std::string& header) {
+  if (failed_ || fd_ < 0 || header.size() != header_ || header.find('\n') != std::string::npos) return false;
+  if (!flush()) return false;
+  std::size_t offset = 0;
+  while (offset < header.size()) {
+    const auto count = pwrite(fd_, header.data() + offset, header.size() - offset, offset);
+    if (count < 0 && errno == EINTR) continue;
+    if (count <= 0) return !(failed_ = true);
+    offset += count;
+  }
+  return true;
+}
+
+bool Receipt::commit() {
+  bool ok = flush() && !fsync(fd_);
+  if (fd_ >= 0 && ::close(fd_) && errno != EINTR) ok = false;
+  fd_ = -1;
+  return ok;
+}
+
+bool LineReader::next(std::string& line) {
+  line.clear();
+  while (!failed_) {
+    const auto* begin = buffer_.data() + start_;
+    if (const auto* newline = static_cast<const char*>(std::memchr(begin, '\n', end_ - start_))) {
+      line.append(begin, newline - begin);
+      start_ += newline - begin + 1;
+      if (line.size() > longest_) break;
+      return true;
+    }
+    line.append(begin, end_ - start_);
+    start_ = end_ = 0;
+    if (line.size() > longest_ || eof_) break;
+    const auto count = read(fd_, buffer_.data(), buffer_.size());
+    if (count < 0 && errno == EINTR) continue;
+    if (count < 0) break;
+    eof_ = !count;
+    end_ = count;
+  }
+  // A last line without its newline, or one too long, makes the file unclean.
+  failed_ = failed_ || !line.empty() || !eof_;
+  return false;
+}
+
 // Waits have no timeout (no timed wait has been proven on the console): every change a waiter needs is
 // notified. The job's cancel flag is not, so a waiter sees it at the next notification, which always
 // comes while the other side has queued work: commands are sealed before any wait for room.
@@ -35,8 +119,9 @@ Writer::~Writer() {
   stop_threads();
 }
 
-bool Writer::start(std::size_t ring_bytes) {
+bool Writer::start(std::size_t ring_bytes, Receipt& receipt) {
   if (ring_bytes < 1024 * 1024) return false;
+  receipt_ = &receipt;
   ring_ = static_cast<unsigned char*>(std::malloc(ring_bytes));
   if (!ring_) return false;
   capacity_ = ring_bytes;
@@ -222,8 +307,7 @@ void Writer::write_loop() {
       }
       if (!skip && digest.size() != 64) fail("Cannot verify extracted file.");
       if (!failed()) {
-        receipt_ += digest + "|" + name + "\n";
-        if (receipt_.size() > max_metadata_bytes) fail("Extraction receipt exceeds the metadata limit.");
+        if (!receipt_->add(digest, name)) fail("Cannot write extraction receipt.");
         const auto folder = path.size() - name.size() - 1;
         if (!path.ends_with("/" + name) || (!root_.empty() && path.compare(0, folder, root_)))
           fail("Extracted file outside its folder.");
@@ -256,11 +340,15 @@ std::string Writer::readback(const std::string& file) {
 }
 
 // Every file is on disk before the receipt: inputs are deleted once extraction completes.
-void Writer::sync_loop(const std::vector<std::size_t>& lines, std::atomic<std::size_t>& next) {
+void Writer::sync_loop(LineReader& lines, std::mutex& reading, std::atomic<std::size_t>& synced_files, std::size_t total, const Progress& progress) {
   name_thread("archive-sync");
-  for (std::size_t index; !failed() && (index = next++) < lines.size();) {
-    const auto at = receipt_.find('|', lines[index]) + 1;
-    const auto file = root_ + "/" + receipt_.substr(at, receipt_.find('\n', at) - at);
+  std::string line;
+  while (!failed()) {
+    {
+      std::lock_guard lock(reading);
+      if (!lines.next(line)) return;
+    }
+    const auto file = root_ + "/" + line.substr(line.find('|') + 1);
     const auto syncing = std::chrono::steady_clock::now();
     // fsync needs no write access; a filesystem that wants it gets the file opened for writing.
     int fd = open(file.c_str(), O_RDONLY | O_NOFOLLOW);
@@ -275,6 +363,7 @@ void Writer::sync_loop(const std::vector<std::size_t>& lines, std::atomic<std::s
     timings_.sync_us += elapsed_us(syncing);
     ++timings_.syncs;
     if (!synced) fail(std::strerror(error));
+    else if (const auto count = ++synced_files; progress) progress(count, total);
   }
 }
 
@@ -290,20 +379,29 @@ void Writer::stop_threads() {
   ring_ = nullptr;
 }
 
-std::string Writer::finish(std::string& receipt) {
+std::string Writer::finish(const Progress& progress) {
   stop_threads();
-  std::vector<std::size_t> lines;
-  for (std::size_t at = 0; at < receipt_.size(); at = receipt_.find('\n', at) + 1) lines.push_back(at);
-  std::atomic<std::size_t> next{0};
+  // The files to sync are read back from the receipt, past its header, a line at a time.
+  int fd = -1;
+  if (!failed() && (!receipt_->flush() || (fd = open(receipt_->path().c_str(), O_RDONLY | O_NOFOLLOW)) < 0))
+    fail("Cannot read extraction receipt.");
+  LineReader lines(fd);
+  std::mutex reading;
+  std::string header;
+  if (fd >= 0 && !lines.next(header)) fail("Cannot read extraction receipt.");
+  const std::size_t total = receipt_->files();
+  std::atomic<std::size_t> synced{0};
+  if (progress && !failed()) progress(0, total);
   // Without threads, the files are synced here, one after another.
   std::array<WorkerThread, syncers> threads;
   for (auto& thread : threads)
-    if (!failed() && lines.size() > 1) thread.start([&] { sync_loop(lines, next); }, thread_stack);
-  sync_loop(lines, next);
+    if (!failed() && total > 1) thread.start([&] { sync_loop(lines, reading, synced, total, progress); }, thread_stack);
+  sync_loop(lines, reading, synced, total, progress);
   for (auto& thread : threads) thread.join();
+  if (fd >= 0) close(fd);
   if (cancelled_) return {};
   if (failed_ || aborted_) return error_.empty() ? "Extraction stopped." : error_;
-  receipt += receipt_;
+  if (!lines.clean() || synced != total) return "Cannot read extraction receipt.";
   return {};
 }
 }

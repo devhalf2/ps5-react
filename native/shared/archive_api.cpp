@@ -50,11 +50,14 @@ JSValue extract(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
     if (!ok) return JS_ThrowTypeError(ctx,"archives.extract: source path is not allowed");
     request.sources.push_back(std::move(file));
   }
+  if (argc > 4) request.stream = JS_ToBool(ctx,argv[4]) == 1;
   std::string error; const auto id = archives::enqueue(std::move(request),error);
   if (!id) return JS_ThrowPlainError(ctx,"archives.extract: %s",error.c_str());
   return JS_NewUint32(ctx,id);
 }
-// Reads only a few headers, so it runs on the render thread; a download in progress can be inspected.
+// The headers are read on a worker: a download writing to the same drive can hold one read for seconds.
+// The render thread waits a few frames at most and otherwise reports the read as pending.
+constexpr std::chrono::milliseconds inspect_wait{25};
 JSValue inspect(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
   if (argc < 1 || !JS_IsArray(argv[0])) return JS_ThrowTypeError(ctx,"archives.inspect: expected sources");
   const JSValue length_value = JS_GetPropertyStr(ctx,argv[0],"length"); std::uint32_t length = 0;
@@ -67,10 +70,12 @@ JSValue inspect(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
     if (!ok) return JS_ThrowTypeError(ctx,"archives.inspect: source path is not allowed");
     sources.push_back(std::move(file));
   }
-  const auto inspection = archives::inspect(sources);
+  const host::CallScope scope("archives.inspect");
+  const auto [inspection, pending] = archives::inspect_soon(sources, inspect_wait);
   JSValue out = JS_NewObject(ctx);
   JS_SetPropertyStr(ctx,out,"kind",JS_NewString(ctx,inspection.kind.c_str()));
   JS_SetPropertyStr(ctx,out,"refusal",JS_NewString(ctx,inspection.refusal.c_str()));
+  if (pending) JS_SetPropertyStr(ctx,out,"pending",JS_TRUE);
   return out;
 }
 JSValue cancel(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
@@ -85,7 +90,11 @@ JSValue poll(JSContext* ctx, JSValueConst, int, JSValueConst*) {
     JS_SetPropertyStr(ctx,item,"id",JS_NewUint32(ctx,snapshot.id));
     JS_SetPropertyStr(ctx,item,"state",JS_NewString(ctx,snapshot.state.c_str()));
     JS_SetPropertyStr(ctx,item,"error",JS_NewString(ctx,snapshot.error.c_str()));
+    JS_SetPropertyStr(ctx,item,"phase",JS_NewString(ctx,snapshot.phase.c_str()));
+    JS_SetPropertyStr(ctx,item,"synced",JS_NewFloat64(ctx,snapshot.synced));
+    JS_SetPropertyStr(ctx,item,"syncTotal",JS_NewFloat64(ctx,snapshot.sync_total));
     JS_SetPropertyStr(ctx,item,"written",JS_NewFloat64(ctx,snapshot.written));
+    JS_SetPropertyStr(ctx,item,"total",snapshot.total ? JS_NewFloat64(ctx,snapshot.total) : JS_NULL);
     JS_SetPropertyStr(ctx,item,"entries",JS_NewFloat64(ctx,snapshot.entries));
     JSValue artifacts = JS_NewArray(ctx); std::uint32_t at = 0;
     for (const auto& path : snapshot.artifacts) JS_SetPropertyUint32(ctx,artifacts,at++,JS_NewString(ctx,path.c_str()));
@@ -97,7 +106,7 @@ JSValue poll(JSContext* ctx, JSValueConst, int, JSValueConst*) {
 }
 JSValue ps5_react_archive_api(JSContext* ctx) {
   JSValue api = JS_NewObject(ctx);
-  JS_SetPropertyStr(ctx,api,"extract",JS_NewCFunction(ctx,extract,"extract",4));
+  JS_SetPropertyStr(ctx,api,"extract",JS_NewCFunction(ctx,extract,"extract",5));
   JS_SetPropertyStr(ctx,api,"inspect",JS_NewCFunction(ctx,inspect,"inspect",1));
   JS_SetPropertyStr(ctx,api,"cancel",JS_NewCFunction(ctx,cancel,"cancel",1));
   JS_SetPropertyStr(ctx,api,"poll",JS_NewCFunction(ctx,poll,"poll",0));

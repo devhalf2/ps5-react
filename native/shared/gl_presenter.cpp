@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Additional attribution term: see LICENSE-ATTRIBUTION.
 #include "gl_presenter.hpp"
+#include "shader_layers.hpp"
 
 #ifdef __APPLE__
 #include <OpenGL/gl3.h>
@@ -315,8 +316,9 @@ void GlPresenter::free_layer_images(std::size_t keep) {
 
 // Draws the layers into the viewport (x, y, w, h), which shows the whole framebuffer, then leaves
 // premultiplied blending on for the framebuffer drawn over them. Textures no layer used are freed.
+// Shader layers, when active, were already drawn underneath and are kept.
 void GlPresenter::draw_layers(int x, int y, int w, int h) {
-  glClearColor(0, 0, 0, 1); glClear(GL_COLOR_BUFFER_BIT);
+  if (!shader_layers::active()) { glClearColor(0, 0, 0, 1); glClear(GL_COLOR_BUFFER_BIT); }
   glEnable(GL_BLEND);
   glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
   glUseProgram(layer_program_);
@@ -357,6 +359,15 @@ bool GlPresenter::present(int sw, int sh) {
   glBindFramebuffer(GL_FRAMEBUFFER, 0);
   glDisable(GL_BLEND); glDisable(GL_DEPTH_TEST); glDisable(GL_SCISSOR_TEST);
   glDisable(GL_FRAMEBUFFER_SRGB);
+  const float scale = one_to_one(sw, sh) ? 1.0f : std::min(float(sw) / width_, float(sh) / height_);
+  const int vw = int(width_ * scale), vh = int(height_ * scale);
+  // Shader layers go under the framebuffer, which then blends over them with its premultiplied alpha:
+  // opaque UI covers them, a cutout shows them (docs/SHADERS.md).
+  if (shader_layers::active()) {
+    glViewport(0, 0, sw, sh);
+    glClearColor(0, 0, 0, 1); glClear(GL_COLOR_BUFFER_BIT);
+    shader_layers::render({sh, float((sw - vw) / 2), float((sh - vh) / 2), scale});
+  }
   glBindVertexArray(vao_);
   glActiveTexture(GL_TEXTURE0);
   ++presents_;
@@ -382,10 +393,10 @@ bool GlPresenter::present(int sw, int sh) {
     glBindTexture(GL_TEXTURE_BUFFER, 0);
     return glGetError() == GL_NO_ERROR;
   }
-  glViewport(0, 0, sw, sh);
-  glClearColor(0, 0, 0, 1); glClear(GL_COLOR_BUFFER_BIT);
-  const float scale = std::min(float(sw) / width_, float(sh) / height_);
-  const int vw = int(width_ * scale), vh = int(height_ * scale);
+  if (!shader_layers::active()) {
+    glViewport(0, 0, sw, sh);
+    glClearColor(0, 0, 0, 1); glClear(GL_COLOR_BUFFER_BIT);
+  }
   glViewport((sw-vw)/2, (sh-vh)/2, vw, vh);
   if (layered) draw_layers((sw - vw) / 2, (sh - vh) / 2, vw, vh);
   glBindVertexArray(vao_);
@@ -405,6 +416,7 @@ void GlPresenter::release_buffer() {
 }
 
 void GlPresenter::release() {
+  shader_layers::release_gl();
   release_buffer();
   for (const LayerImage& image : layer_images_) {
     glDeleteTextures(int(image.textures.size()), image.textures.data());

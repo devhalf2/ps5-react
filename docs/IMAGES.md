@@ -54,18 +54,21 @@ them with no opt-in.
   the URL, for example `Image.load https://example.com/a.jpg: HTTP 404`.
 - **Lifetime.** Unmounting the element or changing its `source` releases the
   image; a fetch or decode that nothing else is waiting for is cancelled.
-- **Hidden screens.** `<ReleaseImages when={hidden}>` lets the images under it
+- **Released images.** `<ReleaseImages when={released}>` lets the images under it
   go while `when` is true, except those on screen when it turned true: they stay
   mounted, but the decoded cache may evict the released ones, least recently
   used first. When it turns false they are taken again without re-rendering when
   still cached; an evicted one keeps drawing nothing until its reload lands. On
   screen is by layout, clipped by enclosing ScrollViews, at the moment of
   release; transforms are not applied, and hiding with `display: 'none'` in the
-  same render still counts the last layout. The kept images pin about one
-  screen of decoded art. Wrap a screen kept mounted while hidden (see
-  [NAVIGATION.md](NAVIGATION.md)): in a private 3840×2160 app, a hidden home
-  screen otherwise pinned about 60 MiB of decoded art while the next page loaded
-  its own, and the PS5 heap peaked at 238 of 256 MiB.
+  same render still counts the last layout. Scopes nest: an inner one is
+  released while either is. Wrap a screen kept mounted while hidden (see
+  [NAVIGATION.md](NAVIGATION.md)), or the parts of a long page far from focus:
+  an image in use is never evicted, so a page that mounts every row's art keeps
+  the decoded cache full and its images pin registry slots that new ones need.
+  In a private 3840×2160 app, a hidden home screen otherwise pinned about 60 MiB
+  of decoded art while the next page loaded its own, and the PS5 heap peaked at
+  238 of 256 MiB.
 - **Lazy loading.** As a browser's `loading="lazy"`, an element's image goes to
   the network only once it has been mounted for 120 ms, and no request starts
   while a ScrollView moves or for 150 ms after it stops: a held key scrolls past

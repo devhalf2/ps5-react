@@ -105,6 +105,14 @@ def compile_client(directory):
     return binary
 
 
+def disk_key(url):
+    """The disk cache's file name for a URL: its 64-bit FNV-1a hash in hex."""
+    value = 14695981039346656037
+    for byte in url.encode():
+        value = ((value ^ byte) * 1099511628211) & (2**64 - 1)
+    return f"{value:016x}"
+
+
 def argb(path, width, height):
     """Premultiplied ARGB8888 words to an RGBA image."""
     pixels = struct.unpack(f"<{width * height}I", path.read_bytes())
@@ -194,14 +202,27 @@ def main():
         # 12 images of 4 MiB against a 24 MiB budget: the 6 oldest unused go, the one in use stays.
         evicted = run("evict", origin + "/photo.jpg", 12)
         assert evicted == {"loaded": 12, "evicted": 6, "first": 2, "kept": True}, evicted
+        # An extraction's memory hold and heap pressure keep unused images to 16 MiB (the one in use and the
+        # three newest), the normal 64 MiB returns after, and a decode that would fill the heap is refused.
+        squeezed = run("squeeze", origin + "/photo.jpg")
+        assert squeezed == {"loaded": 12, "calm": 0, "held": 8, "held_mib": 16, "reloaded": 8, "restored": 0,
+                            "pressed": 8, "relieved": True,
+                            "full": "Image.load " + origin + "/photo.jpg?n=full: out of memory to decode (heap near full)"}, squeezed
         # A second launch serves the encoded bytes from the disk cache without a request.
         cache = directory / "cache"
         before = len(Handler.requests)
         first = run("load", origin + "/photo.jpg?disk", 64, 64, COVER, directory / "pixels", cache=cache)
         again = run("load", origin + "/photo.jpg?disk", 32, 32, COVER, directory / "pixels", cache=cache)
         assert first["ready"] and again["ready"] and len(Handler.requests) == before + 1, (first, again)
+        # With all 32 connections busy, a load whose disk-cached bytes are corrupt waits for a connection.
+        busy_cache = directory / "busy-cache"
+        busy_cache.mkdir()
+        corrupt = origin + "/red.png?corrupt"
+        (busy_cache / disk_key(corrupt)).write_bytes(b"x")
+        busy = run("busy", origin + "/slow.jpg", corrupt, cache=busy_cache)
+        assert busy == {"loaded": 33, "ready": 33}, busy
         print("Remote images: cover/contain/stretch fitting without enlargement, box-filter quality, premultiplied "
-              "alpha, error messages, allocation failure and recovery, shared fetches, cancellation, LRU eviction and the disk cache passed.")
+              "alpha, error messages, allocation failure and recovery, shared fetches, cancellation, busy connections, LRU eviction, memory holds, heap pressure and the disk cache passed.")
     server.shutdown()
 
 

@@ -15,6 +15,7 @@
 #include <vector>
 
 std::size_t archives::pipeline_bytes() { return 0; }
+bool archives::hold_memory(bool) { return true; }
 void archives::trace(const char*, const char*) {}
 bool archives::list_directory(const char*, void (*)(const char*, void*), void*) { return false; }
 
@@ -29,6 +30,20 @@ std::string sha(const std::vector<unsigned char>& bytes) {
   hash.update(bytes.data(), bytes.size());
   return hash.finish();
 }
+std::string slurp_text(const std::string& path) {
+  std::string out;
+  FILE* file = std::fopen(path.c_str(), "rb");
+  char block[65536];
+  std::size_t count;
+  while ((count = std::fread(block, 1, sizeof block, file)) > 0) out.append(block, count);
+  std::fclose(file);
+  return out;
+}
+// A fresh receipt in `dir`, as an extraction opens one in its staging.
+void open_receipt(archives::Receipt& receipt, const std::string& dir) {
+  unlink((dir + "/receipt").c_str());
+  assert(receipt.open(dir + "/receipt", "P5AR001:test"));
+}
 std::vector<unsigned char> slurp(const std::string& path) {
   std::vector<unsigned char> out;
   FILE* file = std::fopen(path.c_str(), "rb");
@@ -42,8 +57,11 @@ std::vector<unsigned char> slurp(const std::string& path) {
 void round_trip(const std::string& dir, std::mt19937& rng, std::size_t ring) {
   std::atomic<bool> cancelled{false};
   archives::Timings timings;
+  // Declared first: the writer's thread adds to it until the writer is gone.
+  archives::Receipt receipt;
+  open_receipt(receipt, dir);
   archives::Writer writer(cancelled, timings);
-  assert(writer.start(ring));
+  assert(writer.start(ring, receipt));
   const int files = 1 + rng() % 200;
   std::vector<std::vector<unsigned char>> contents;
   std::string expected;
@@ -67,10 +85,16 @@ void round_trip(const std::string& dir, std::mt19937& rng, std::size_t ring) {
     expected += sha(data) + "|" + name + "\n";
     contents.push_back(std::move(data));
   }
-  std::string receipt;
-  const auto error = writer.finish(receipt);
+  std::atomic<std::size_t> reports{0}, last_total{0}, most{0};
+  const auto error = writer.finish([&](std::size_t synced, std::size_t total) {
+    ++reports;
+    last_total = total;
+    for (auto seen = most.load(); synced > seen && !most.compare_exchange_weak(seen, synced);) {}
+  });
   if (!error.empty()) std::fprintf(stderr, "error: %s\n", error.c_str());
-  assert(error.empty() && receipt == expected);
+  assert(error.empty() && receipt.commit() && slurp_text(dir + "/receipt") == "P5AR001:test\n" + expected);
+  // One report before the fsyncs and one after each.
+  assert(reports == std::size_t(files) + 1 && last_total == std::size_t(files) && most == std::size_t(files));
   for (int i = 0; i < files; ++i) {
     assert(slurp(dir + "/f" + std::to_string(i)) == contents[i]);
     unlink((dir + "/f" + std::to_string(i)).c_str());
@@ -80,16 +104,18 @@ void round_trip(const std::string& dir, std::mt19937& rng, std::size_t ring) {
 void write_error(const std::string& dir) {
   std::atomic<bool> cancelled{false};
   archives::Timings timings;
+  // Declared first: the writer's thread adds to it until the writer is gone.
+  archives::Receipt receipt;
+  open_receipt(receipt, dir);
   archives::Writer writer(cancelled, timings);
-  assert(writer.start(1 << 20));
+  assert(writer.start(1 << 20, receipt));
   const int fd = open((dir + "/ro").c_str(), O_RDONLY | O_CREAT, 0600);
   assert(writer.begin(fd, dir + "/ro", "ro"));
   std::vector<unsigned char> data(8 << 20, 7);
   bool accepted = true;
   for (int i = 0; i < 64 && accepted; ++i) accepted = writer.append(data.data(), data.size(), std::size_t(i) * data.size());
-  std::string receipt;
-  const auto error = accepted && writer.end() ? writer.finish(receipt) : writer.error();
-  assert(!error.empty() && receipt.empty());
+  const auto error = accepted && writer.end() ? writer.finish() : writer.error();
+  assert(!error.empty() && receipt.files() == 0);
   unlink((dir + "/ro").c_str());
 }
 
@@ -97,16 +123,19 @@ void write_error(const std::string& dir) {
 void scattered(const std::string& dir) {
   std::atomic<bool> cancelled{false};
   archives::Timings timings;
+  // Declared first: the writer's thread adds to it until the writer is gone.
+  archives::Receipt receipt;
+  open_receipt(receipt, dir);
   archives::Writer writer(cancelled, timings);
-  assert(writer.start(1 << 20));
+  assert(writer.start(1 << 20, receipt));
   std::vector<unsigned char> data(20000);
   for (std::size_t i = 0; i < data.size(); ++i) data[i] = static_cast<unsigned char>(i * 7);
   const int fd = open((dir + "/s").c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
   assert(fd >= 0 && writer.begin(fd, dir + "/s", "s"));
   for (std::size_t i = data.size(); i-- > 0;) assert(writer.append(&data[i], 1, i));
   assert(writer.end());
-  std::string receipt;
-  assert(writer.finish(receipt).empty() && receipt == sha(data) + "|s\n" && slurp(dir + "/s") == data);
+  assert(writer.finish().empty() && receipt.commit() && slurp_text(dir + "/receipt") == "P5AR001:test\n" + sha(data) + "|s\n");
+  assert(slurp(dir + "/s") == data);
   unlink((dir + "/s").c_str());
 }
 
@@ -114,16 +143,18 @@ void scattered(const std::string& dir) {
 void sync_missing(const std::string& dir) {
   std::atomic<bool> cancelled{false};
   archives::Timings timings;
+  // Declared first: the writer's thread adds to it until the writer is gone.
+  archives::Receipt receipt;
+  open_receipt(receipt, dir);
   archives::Writer writer(cancelled, timings);
-  assert(writer.start(1 << 20));
+  assert(writer.start(1 << 20, receipt));
   std::vector<unsigned char> data(4096, 3);
   for (const char* name : {"m0", "m1", "m2"}) {
     const int fd = open((dir + "/" + name).c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
     assert(fd >= 0 && writer.begin(fd, dir + "/" + name, name) && writer.append(data.data(), data.size(), 0) && writer.end());
   }
   unlink((dir + "/m1").c_str());
-  std::string receipt;
-  assert(!writer.finish(receipt).empty() && receipt.empty());
+  assert(!writer.finish().empty());
   unlink((dir + "/m0").c_str());
   unlink((dir + "/m2").c_str());
 }
@@ -131,8 +162,11 @@ void sync_missing(const std::string& dir) {
 void cancel_midway(const std::string& dir, std::mt19937& rng) {
   std::atomic<bool> cancelled{false};
   archives::Timings timings;
+  // Declared first: the writer's thread adds to it until the writer is gone.
+  archives::Receipt receipt;
+  open_receipt(receipt, dir);
   archives::Writer writer(cancelled, timings);
-  assert(writer.start(1 << 20));
+  assert(writer.start(1 << 20, receipt));
   std::vector<unsigned char> data(256 * 1024, 1);
   const int stop_after = rng() % 40;
   for (int i = 0; i < 40; ++i) {

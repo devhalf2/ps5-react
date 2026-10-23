@@ -1,0 +1,16 @@
+{
+  "$schema": "../../app.schema.json",
+  "titleId": "PPSA99063",
+  "contentId": "UP9000-PPSA99063_00-SHADERLAB0000000",
+  "name": "Shader Lab",
+  "version": "01.000.000",
+  "render": {
+    "width": 1920,
+    "height": 1080
+  },
+  "surface": {
+    "width": 1920,
+    "height": 1080
+  },
+  "timeoutSeconds": 0
+}

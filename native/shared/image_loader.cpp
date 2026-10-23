@@ -102,6 +102,16 @@ constexpr long kHostConnections = 8;
 // Images in the decoded, encoded or disk cache skip the wait.
 constexpr auto kDwell = std::chrono::milliseconds(120);
 std::atomic<std::size_t> cache_bytes{kCacheBytes};
+std::atomic<int> holds{0};
+std::atomic<Heap (*)()> heap_probe{nullptr};
+Heap heap() {
+  const auto probe = heap_probe.load();
+  return probe ? probe() : Heap{};
+}
+bool low_memory() {
+  const Heap h = heap();
+  return holds > 0 || (h.size && h.live > h.size / 100 * kPressurePercent);
+}
 std::atomic<Clock::rep> deferred_until{0};
 // New fetches wait while encoded bytes held anywhere (transfers, the decode queue, the encoded
 // cache) exceed this; transfers in flight still finish. Responses are rarely over 2 MiB.
@@ -142,6 +152,9 @@ using Body = std::shared_ptr<const Bytes>;
 struct Counters {
   std::atomic<std::uint64_t> loads{0}, decoded_hits{0}, encoded_hits{0}, disk_hits{0}, fetches{0}, decodes{0},
     decode_us{0}, cancelled{0}, aborted{0}, retries{0}, failed{0}, shown{0}, shown_ms{0}, shown_max_ms{0};
+  // After each poll: decoded images in the cache, those an element or prefetch still holds, and the
+  // engine registry's slots in use (images published from the cache plus the app's baked ones).
+  std::atomic<std::uint64_t> cached{0}, pinned{0}, registry{0};
 } counters;
 // `last`: the latest failure's reason, so the stats line says why an origin fails.
 struct Origin { std::string host, last; std::uint64_t requests = 0, failures = 0, ms = 0, bytes = 0; };
@@ -365,6 +378,13 @@ bool decode(Entry& entry) {
   }
   if (!entry.error.empty()) { entry.body.reset(); return !retry; }
   const int channels = components == 2 || components == 4 ? 4 : 3;
+  const Plan p = plan(width, height, entry.box_width, entry.box_height, entry.fit);
+  const std::size_t need = static_cast<std::size_t>(width) * height * 8 + static_cast<std::size_t>(p.out_width) * p.out_height * 4;
+  if (const Heap h = heap(); h.size && h.live + need > h.size / 100 * kCeilingPercent) {
+    entry.body.reset();
+    entry.error = message(entry, "out of memory to decode (heap near full)");
+    return false;
+  }
   stbi_uc* source = stbi_load_from_memory(bytes, size, &width, &height, &components, channels);
   entry.body.reset();
   if (!source) {
@@ -372,7 +392,6 @@ bool decode(Entry& entry) {
     entry.error = message(entry, retry ? "out of memory to decode" : "decode failed");
     return !retry;
   }
-  const Plan p = plan(width, height, entry.box_width, entry.box_height, entry.fit);
   const bool resampled = resample(source, width, channels, p, entry);
   ++counters.decodes;
   stbi_image_free(source);
@@ -626,8 +645,27 @@ public:
       out.push_back(report(*entry));
       over_budget_ = over_budget_ || entry->pixels;
     }
-    if (over_budget_) trim(evict);
+    // A lower budget (memory held, heap pressure) trims at once; a higher one waits for new images.
+    const std::size_t budget = low_memory() ? std::min(cache_bytes.load(), kLowCacheBytes) : cache_bytes.load();
+    const bool lowered = budget < budget_;
+    budget_ = budget;
+    if (over_budget_ || lowered) trim(evict);
+    std::uint64_t cached = 0, pinned = 0;
+    for (const auto& [id, entry] : by_id_)
+      if (entry->reported && entry->pixels) { ++cached; pinned += entry->refs ? 1 : 0; }
+    counters.cached = cached;
+    counters.pinned = pinned;
     return out;
+  }
+
+  bool evict_unused(std::uint32_t keep, void (*evict)(std::uint32_t)) {
+    EntryPtr oldest;
+    for (const auto& [id, entry] : by_id_)
+      if (id != keep && entry->reported && entry->pixels && !entry->refs && (!oldest || entry->used < oldest->used)) oldest = entry;
+    if (!oldest) return false;
+    evict(oldest->id);
+    forget(*oldest);
+    return true;
   }
 
 private:
@@ -653,7 +691,7 @@ private:
     over_budget_ = false;
     std::size_t total = 0, decoded = 0;
     for (const auto& [id, entry] : by_id_) if (entry->reported && entry->pixels) { total += bytes(*entry); ++decoded; }
-    while (total > cache_bytes || decoded > kCacheEntries) {
+    while (total > budget_ || decoded > kCacheEntries) {
       EntryPtr oldest;
       for (const auto& [id, entry] : by_id_)
         if (entry->reported && entry->pixels && !entry->refs && (!oldest || entry->used < oldest->used)) oldest = entry;
@@ -727,15 +765,21 @@ private:
   }
 
   void remember(const std::string& url, Body body) {
-    std::size_t total = body->size;
+    if (fit_encoded(body->size)) encoded_.push_back({url, std::move(body), ++fetch_clock_});
+  }
+
+  // Drops the least recently used encoded bytes until `extra` more fit the budget; false when they cannot.
+  bool fit_encoded(std::size_t extra) {
+    const std::size_t limit = low_memory() ? kLowEncodedBytes : kEncodedCacheBytes;
+    std::size_t total = extra;
     for (const Encoded& e : encoded_) total += e.body->size;
-    while (total > kEncodedCacheBytes && !encoded_.empty()) {
+    while (total > limit && !encoded_.empty()) {
       auto oldest = std::min_element(encoded_.begin(), encoded_.end(),
                                      [](const Encoded& a, const Encoded& b) { return a.used < b.used; });
       total -= oldest->body->size;
       encoded_.erase(oldest);
     }
-    if (total <= kEncodedCacheBytes) encoded_.push_back({url, std::move(body), ++fetch_clock_});
+    return total <= limit;
   }
 
   // Fetch thread: serves the entry from cached bytes, joins a transfer of its URL, or starts one.
@@ -748,8 +792,11 @@ private:
       return;
     }
     for (Transfer& t : transfers_) if (busy(t) && t.url == entry->url) { t.entries.push_back(std::move(entry)); return; }
-    ++counters.fetches;
+    // Picked as cached, its bytes turned out evicted, stale or corrupt: with every connection busy it
+    // waits for the next round, which counts it as a network load.
     Transfer* t = begin(entry->url, false);
+    if (!t) { std::lock_guard lock(mutex_); fetches_.push_back(std::move(entry)); return; }
+    ++counters.fetches;
     t->entries.push_back(std::move(entry));
     if (!send(*t)) {
       for (const EntryPtr& e : t->entries) fail(e, "could not configure the HTTP transport");
@@ -761,9 +808,11 @@ private:
 
   static bool busy(const Transfer& t) { return t.warm || !t.entries.empty(); }
 
+  // Null when every connection is busy.
   Transfer* begin(const std::string& url, bool warm) {
     Transfer* t = nullptr;
     for (Transfer& candidate : transfers_) if (!busy(candidate)) { t = &candidate; break; }
+    if (!t) return nullptr;
     t->url = url; t->body.clear(); t->overflow = t->out_of_memory = false; t->warm = warm;
     return t;
   }
@@ -781,6 +830,7 @@ private:
       if (cached(url) || disk_.has(url) || std::any_of(transfers_.begin(), transfers_.end(),
           [&](const Transfer& t) { return busy(t) && t.url == url; })) continue;
       Transfer* t = begin(url, true);
+      if (!t) { std::lock_guard lock(mutex_); warms_.push_front(std::move(url)); return; }
       if (!send(*t)) { t->warm = false; return; }
       ++active; ++warming;
       return;
@@ -928,6 +978,7 @@ private:
         idle = fetches_.empty() && deferred <= now;
         if (fetches_.empty() && deferred > now) due = std::min(due, deferred);
       }
+      fit_encoded(0);
       for (EntryPtr& entry : starting) start_fetch(std::move(entry), active);
       while (idle && active < connections && warming < kWarmConnections && encoded_bytes < kEncodedBudget) {
         const unsigned before = warming;
@@ -1020,6 +1071,7 @@ private:
   std::unordered_map<std::uint32_t, EntryPtr> by_id_;
   std::uint32_t next_id_ = 1;
   std::uint64_t clock_ = 0;
+  std::size_t budget_ = kCacheBytes;
 };
 Service service;
 } // namespace
@@ -1034,8 +1086,12 @@ std::uint32_t load(const std::string& url, int width, int height, Fit fit, bool 
 void release(std::uint32_t id, bool prefetch) { service.release(id, prefetch); }
 void warm(std::vector<std::string> urls) { service.warm(std::move(urls)); }
 std::vector<Result> poll(void (*evict)(std::uint32_t)) { return service.poll(evict); }
+bool evict_unused(std::uint32_t keep, void (*evict)(std::uint32_t)) { return service.evict_unused(keep, evict); }
+void note_registry(unsigned used) { counters.registry = used; }
 Memory memory() { return {encoded_bytes.load(), decoded_bytes.load()}; }
 void set_cache_bytes(std::size_t bytes) { cache_bytes = bytes; }
+void hold_memory(bool hold) { holds += hold ? 1 : -1; }
+void set_heap_probe(Heap (*probe)()) { heap_probe = probe; }
 void defer(int ms) {
   deferred_until = (Clock::now() + std::chrono::milliseconds(ms)).time_since_epoch().count();
 }
@@ -1045,7 +1101,8 @@ std::string stats() {
   const std::uint64_t decodes = counters.decodes;
   std::snprintf(line, sizeof line,
                 "loads=%llu decoded-cache=%llu encoded-cache=%llu disk=%llu net=%llu decodes=%llu (%.1f ms avg) "
-                "shown=%llu (%llu ms avg, %llu max) cancelled=%llu aborted=%llu retries=%llu failed=%llu",
+                "shown=%llu (%llu ms avg, %llu max) cancelled=%llu aborted=%llu retries=%llu failed=%llu "
+                "cached=%llu pinned=%llu registry=%llu",
                 static_cast<unsigned long long>(counters.loads.load()), static_cast<unsigned long long>(counters.decoded_hits.load()),
                 static_cast<unsigned long long>(counters.encoded_hits.load()), static_cast<unsigned long long>(counters.disk_hits.load()),
                 static_cast<unsigned long long>(counters.fetches.load()), static_cast<unsigned long long>(decodes),
@@ -1053,7 +1110,9 @@ std::string stats() {
                 static_cast<unsigned long long>(counters.shown ? counters.shown_ms / counters.shown : 0),
                 static_cast<unsigned long long>(counters.shown_max_ms.load()),
                 static_cast<unsigned long long>(counters.cancelled.load()), static_cast<unsigned long long>(counters.aborted.load()),
-                static_cast<unsigned long long>(counters.retries.load()), static_cast<unsigned long long>(counters.failed.load()));
+                static_cast<unsigned long long>(counters.retries.load()), static_cast<unsigned long long>(counters.failed.load()),
+                static_cast<unsigned long long>(counters.cached.load()), static_cast<unsigned long long>(counters.pinned.load()),
+                static_cast<unsigned long long>(counters.registry.load()));
   std::string out = line;
   std::vector<Origin> busiest;
   { std::lock_guard lock(origins_mutex); busiest = origins; }
@@ -1080,8 +1139,12 @@ std::uint32_t load(const std::string& url, int, int, Fit, bool, Result&, std::st
 void release(std::uint32_t, bool) {}
 void warm(std::vector<std::string>) {}
 std::vector<Result> poll(void (*)(std::uint32_t)) { return {}; }
+bool evict_unused(std::uint32_t, void (*)(std::uint32_t)) { return false; }
+void note_registry(unsigned) {}
 Memory memory() { return {}; }
 void set_cache_bytes(std::size_t) {}
+void hold_memory(bool) {}
+void set_heap_probe(Heap (*)()) {}
 void defer(int) {}
 std::string stats() { return {}; }
 } // namespace images

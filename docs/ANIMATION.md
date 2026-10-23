@@ -381,6 +381,12 @@ plus an offscreen copy when that area is faded or transformed.
   full-screen fade blends every pixel each frame and is the most expensive
   animation available. Fade cards, toasts, and highlights rather than screens,
   and keep screen fades short.
+- **A still group fades from one cached copy.** While nothing inside a fading
+  group changes, the fade cache (one 1920×1080 slot) blends a copy captured on
+  the first frame instead of re-rendering the group. To fade a whole screen,
+  fade one `overflow-hidden` group around it and hold everything inside still
+  for the fade (no moving light, no nested fade): a change inside drops the
+  copy for that frame. A smaller group never evicts a larger one mid-fade.
 - **Colors are not animatable.** Crossfade two layers, as shown above.
 - **Values are pooled.** The engine has a fixed pool of animated values.
   `motion` allocates one per animated key on first use and releases it on

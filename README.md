@@ -659,6 +659,7 @@ excluded from version control.
 | [External apps](docs/EXTERNAL-APPS.md) | Separate repositories and editor configuration |
 | [Navigation](docs/NAVIGATION.md) · [Long lists](docs/LISTS.md) | Focus, back handling, scrolling and large catalogs |
 | [Tailwind](docs/TAILWIND.md) · [Animation](docs/ANIMATION.md) | Utilities, themes, transitions and renderer limits |
+| [Shaders](docs/SHADERS.md) | `ShaderView` GPU layers and the `BootIntro` entrance |
 | [Native APIs](docs/NATIVE-API.md) · [Remote images](docs/IMAGES.md) | Platform services, signatures and media |
 | [Networking](docs/NETWORKING.md) · [Download performance](docs/DOWNLOAD-PERFORMANCE.md) | HTTP, downloads, resume, formats and resource budgets |
 | [Storage](docs/STORAGE.md) · [Hardware evidence](docs/HARDWARE.md) | Filesystem access and exact console validation results |

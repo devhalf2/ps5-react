@@ -142,8 +142,9 @@ export function VirtualList(props) {
           }
         }
         list.base = base;
-        list.scroll -= dy;
-        frame.shift(dy);
+        // Only the list's rows moved: offsets above the list's top keep theirs.
+        frame.shift(dy, y - frame.viewport.y);
+        list.scroll = frame.y;
         rerender();
       },
       /**

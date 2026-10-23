@@ -133,25 +133,68 @@ export function findClosest(rect, candidates) {
  * @param {number} size item size
  * @param {number} viewport viewport size
  * @param {number} max largest valid offset
- * @param {number} margin
+ * @param {number | [number, number]} margin both edges, or `[before, after]` (top/left, bottom/right)
  */
 export function revealOffset(offset, start, size, viewport, max, margin) {
+  const [before, after] = Array.isArray(margin) ? margin : [margin, margin];
   let next = offset;
-  if (start + size + margin > next + viewport) next = start + size + margin - viewport;
-  if (start - margin < next) next = start - margin;
+  if (start + size + after > next + viewport) next = start + size + after - viewport;
+  if (start - before < next) next = start - before;
   return Math.min(Math.max(next, 0), max);
 }
 
 /**
  * The offset that aligns an anchor's start `margin` past the viewport start (clamped), so a section
- * title stays above its focused card; minimal movement instead when that would not show the item.
+ * title stays above its focused card; minimal movement instead when that would not show the item with
+ * `end` px to spare at the viewport's end (an overlay there).
  * @param {number} offset @param {number} start @param {number} size @param {number} anchor anchor start
- * @param {number} viewport @param {number} max @param {number} margin
+ * @param {number} viewport @param {number} max @param {number | [number, number]} margin as revealOffset's
+ * @param {number} [end]
  */
-export function anchorOffset(offset, start, size, anchor, viewport, max, margin) {
-  const aligned = Math.min(Math.max(anchor - margin, 0), max);
-  if (start >= aligned && start + size <= aligned + viewport) return aligned;
+export function anchorOffset(offset, start, size, anchor, viewport, max, margin, end = 0) {
+  const before = Array.isArray(margin) ? margin[0] : margin;
+  const aligned = Math.min(Math.max(anchor - before, 0), max);
+  if (start >= aligned && start + size + end <= aligned + viewport) return aligned;
   return revealOffset(offset, start, size, viewport, max, margin);
+}
+
+/**
+ * revealOffset for a list of rows: of the offsets that put a row's start `margin` past the viewport
+ * start (or the content start), the one nearest the least movement that still shows the item whole, so
+ * the scroll lands on a row's top; the least movement itself when none does. Only starts count: a gap
+ * or the end of the row before would leave blank space at the top.
+ * @param {number} offset @param {number} start item start @param {number} size item size
+ * @param {number} viewport @param {number} max @param {number | [number, number]} margin as revealOffset's
+ * @param {Iterable<number>} starts each row's start, in content coordinates
+ */
+export function snapRevealOffset(offset, start, size, viewport, max, margin, starts) {
+  const [before, after] = Array.isArray(margin) ? margin : [margin, margin];
+  const next = revealOffset(offset, start, size, viewport, max, margin);
+  if (next === offset) return offset;
+  // Offsets that show the item whole (half a pixel of slack for fractional layouts).
+  const low = start + size + after - viewport - 0.5;
+  const high = start - before + 0.5;
+  let best = next;
+  let distance = Infinity;
+  for (const boundary of [before, ...starts]) {
+    const candidate = Math.min(Math.max(boundary - before, 0), max);
+    if (candidate < low || candidate > high || Math.abs(candidate - next) >= distance) continue;
+    best = candidate;
+    distance = Math.abs(candidate - next);
+  }
+  return Math.round(best);
+}
+
+/**
+ * Where an eased-out scroll from `from` to `to` is `elapsed` ms into its `duration`, in whole pixels: a
+ * quartic ease-out, fastest at the start (over half the way in the first 16%) and slowing to rest on
+ * `to` at `duration`, never past it.
+ * @param {number} from @param {number} to @param {number} elapsed ms @param {number} duration ms
+ */
+export function easeOutAt(from, to, elapsed, duration) {
+  if (elapsed >= duration) return to;
+  const remaining = 1 - Math.max(0, elapsed) / duration;
+  return Math.round(from + (to - from) * (1 - remaining ** 4));
 }
 
 /**

@@ -40,7 +40,8 @@ def main():
     parser.add_argument("--ui-reference", type=Path, default=DEPS / "platform")
     parser.add_argument("--embedded-react", type=Path, default=DEPS / "embeddedReact")
     parser.add_argument("--payload-sdk", type=Path, default=DEPS / "sdk/ps5-payload-sdk")
-    parser.add_argument("--llvm", type=Path, default=Path("/opt/homebrew/opt/llvm@18/bin"))
+    # PS5_LLVM points at an LLVM 18 installed elsewhere, such as a user-local Homebrew.
+    parser.add_argument("--llvm", type=Path, default=Path(os.environ.get("PS5_LLVM", "/opt/homebrew/opt/llvm@18/bin")))
     parser.add_argument("--opengl-archive", type=Path)
     args = parser.parse_args()
     app_dir = args.app_dir.resolve() if args.app_dir else ROOT / "apps" / args.app
@@ -133,11 +134,11 @@ def main():
     sources = [ROOT / "native/ps5/native_host.cpp", ROOT / "native/ps5/async_log.cpp", ROOT / "native/ps5/host_platform.cpp", ROOT / "native/ps5/time_compat.c", ROOT / "native/ps5/archive_compat.c",
                ROOT / "native/ps5/filesystem_access.cpp",
                ROOT / "native/ps5/elevation_transport.cpp",
-               ROOT / "native/shared/host_api.cpp", ROOT / "native/shared/network.cpp",
+               ROOT / "native/shared/host_api.cpp", ROOT / "native/shared/removals.cpp", ROOT / "native/shared/network.cpp",
                ROOT / "native/shared/network_api.cpp", ROOT / "native/shared/archives.cpp", ROOT / "native/shared/archive_preflight.cpp", ROOT / "native/shared/rar5_password.cpp", ROOT / "native/shared/archive_writer.cpp", ROOT / "native/shared/archive_api.cpp", ROOT / "native/shared/browser_capture_api.cpp", ROOT / "native/ps5/browser_capture.cpp", ROOT / "native/shared/package_api.cpp", ROOT / "native/ps5/package_installer.cpp", ROOT / "native/ps5/payload_loader.cpp", ROOT / "native/ps5/relaunch.cpp", ROOT / "native/ps5/crash_log.cpp", ROOT / "native/ps5/utf8_locale.cpp", ROOT / "native/ps5/network_platform.cpp",
                ROOT / "native/shared/image_loader.cpp", ROOT / "native/shared/image_api.cpp",
                ROOT / "native/shared/sound_api.cpp", generated / "sounds.generated.c",
-               ROOT / "native/shared/gl_presenter.cpp",
+               ROOT / "native/shared/gl_presenter.cpp", ROOT / "native/shared/shader_layers.cpp",
                ROOT / "native/shared/frame_stats.cpp", ROOT / "native/shared/js_heap.cpp", ROOT / "native/shared/js_profiler.cpp", ROOT / "native/shared/damage_tracker.cpp", ROOT / "native/shared/render_workers.cpp", ROOT / "native/shared/input_script.cpp", ROOT / "native/shared/screenshot.cpp", ROOT / "native/shared/text_shaper.cpp", generated / "assets.generated.c",
                bundle_c, *[hui / ("src/platform/ps5/" + n + ".cpp") for n in ("display_egl", "pad", "system", "audio_out")],
                hui / "src/core/input.cpp", hui / "src/audio/mixer.cpp", hui / "src/runtime/app_heap.c", hui / "src/runtime/runtime_shims.c",
@@ -197,9 +198,10 @@ def main():
     run([sdk / "bin/prospero-clang", "-std=gnu11", "-O2", "-Wall", "-Wextra", "-Werror", "-o", installer,
          ROOT / "native/ps5/payloads/pkg_installer.c", "-lkernel_sys", "-lSceUserService"],
         env=env, log=BUILD / "pkg-installer.log")
-    # RAR sets extract in a payload of their own: UnRAR's license keeps its code out of this GPL app.
+    # RAR sets extract in a payload of their own: UnRAR's license keeps its code out of this GPL app. So
+    # does a 7z that needs more memory than the app's heap gives, with the engine's own libarchive.
     rar_extract = build_rar_worker(BUILD / "rar-extract.elf", [sdk / "bin/prospero-clang++"],
-                                   ["-I", archive_ports / "include"], [archive_ports / "lib/libcrypto.a", builtins], env)
+                                   ["-I", archive_ports / "include"], [*archive_libs, builtins], env)
     # Opens the app again after it closes, which the app itself cannot do.
     relauncher = BUILD / "relauncher.elf"
     run([sdk / "bin/prospero-clang", "-std=gnu11", "-O2", "-Wall", "-Wextra", "-Werror", "-o", relauncher,

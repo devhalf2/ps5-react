@@ -3,7 +3,11 @@
 // Additional attribution term: see LICENSE-ATTRIBUTION.
 #pragma once
 
+#include <cstdint>
+
 // Saves the software framebuffer (the frame on screen until the next commit) as a 24-bit BMP, each
 // pixel the average of a `step`×`step` block: 2 gives the logical size (the framebuffer is rendered at
 // twice it), 1 the full framebuffer. A test-deploy tool: it writes on the calling thread.
 bool save_screenshot(const char* path, int step = 2);
+// The same for any top-down 0x??RRGGBB image (the desktop preview's GL readback when shader layers draw).
+bool save_screenshot(const char* path, const std::uint32_t* pixels, int width, int height, int step);

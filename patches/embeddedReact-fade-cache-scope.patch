@@ -1,0 +1,229 @@
+Embedded React: scope the fade cache to its group, and keep it from thrashing.
+
+Modified from Embedded React (Apache-2.0, Copyright 2026 Cory Lamming) at the
+revision pinned in dependencies.lock.json, after the patches listed before this
+one there. Changed files: engine/scene/compositor.c and
+engine/tests/rendering/test_opacity.c. Not yet proposed upstream.
+
+The fade cache (ERUI_FADE_CACHE_W/H) blends one captured copy of a fading
+group instead of re-rendering it every frame, but any content change anywhere
+on screen dropped the copy: a focus ring's moving light or a progress bar
+elsewhere made every frame a miss. Its copy holds only the group's subtree,
+blended over whatever is under it, so only a change inside the group can make
+it stale. The content generation now advances only for a change in the cached
+group's subtree. A nested opacity value inside the group counts as such a
+change: it was marked visual-only, and a cached group showed it frozen.
+
+One slot serves every translucent group, so a small static one (a 60% ring)
+and a fading screen evicted each other on alternate frames and neither hit. A
+smaller group no longer takes the slot from a larger one composited in this
+commit or the last; it takes the strip path, as without the cache.
+
+Without ERUI_FADE_CACHE_W/H nothing changes.
+
+--- a/engine/scene/compositor.c
++++ b/engine/scene/compositor.c
+@@ -550,11 +550,46 @@
+         s_cur_buf = (s_cur_buf + 1) % s_display_buffer_count;
+ }
+ 
+-/* Global content generation: advanced by every mutation that changes rendered subtree content
+- * (er_mark_dirty_upward and friends). The fade cache stores the generation it captured at; any
+- * bump invalidates it. Deliberately coarse — a content change anywhere invalidates the one
+- * cached subtree — which keeps the check O(1) and always correct. */
++/* Content generation of the fade cache's subtree: advanced by every mutation that changes rendered
++ * content inside the cached group (er_mark_dirty_upward and friends walk up through it). The fade
++ * cache stores the generation it captured at; any bump invalidates it. A change outside the group
++ * leaves the copy valid: the copy holds only the group's own subtree, blended over whatever is under
++ * it. A visual-only mark (an opacity value) below the group changes its content too; only the
++ * group's own opacity does not. */
+ static uint32_t s_content_gen = 1U;
++#if defined(ERUI_FADE_CACHE_W) && defined(ERUI_FADE_CACHE_H) && ERUI_FADE_CACHE_W > 0 && ERUI_FADE_CACHE_H > 0
++/* Defined with the fade cache below; 0xFFFF when nothing is cached. */
++static uint16_t s_fade_cache_tag;
++#endif
++
++/**
++ * @brief Advances the content generation when `node` lies in the cached group's subtree.
++ * @param[in] node   The changed node.
++ * @param[in] self   Whether the group's own change counts (false for its own opacity value).
++ */
++static void bump_content_gen_within(const ERNode* node, bool self)
++{
++#if !(defined(ERUI_FADE_CACHE_W) && defined(ERUI_FADE_CACHE_H) && ERUI_FADE_CACHE_W > 0 && ERUI_FADE_CACHE_H > 0)
++    (void)node;
++    (void)self;
++    s_content_gen++;
++    return;
++#else
++    /* A node in a display:none subtree paints nothing (see er_mark_dirty_upward_visual); showing it
++     * again changes the shown ancestor, which counts. */
++    if (s_fade_cache_tag == 0xFFFFu || !node || node->subtree_hidden)
++        return;
++    for (const ERNode* at = node; at; at = er_get_node(at->parent_tag))
++    {
++        if (at->tag == s_fade_cache_tag)
++        {
++            if (self || at != node)
++                s_content_gen++;
++            return;
++        }
++    }
++#endif
++}
+ 
+ /* Source of content_stamp values; starts above the 0 a fresh node holds. */
+ static uint32_t s_content_stamp = 1U;
+@@ -569,6 +604,7 @@
+ 
+ void er_mark_dirty_upward_visual(ERNode* node)
+ {
++    bump_content_gen_within(node, false);
+     /* A node inside a display:none subtree cannot paint, so changing it changes no pixels. Marking
+      * it (or its ancestors) would be worse than useless: neither flag can be cleared by painting,
+      * so a cached page that React keeps re-rendering would repaint its own rect on every commit —
+@@ -594,7 +630,7 @@
+ 
+ void er_mark_dirty_upward(ERNode* node)
+ {
+-    s_content_gen++;
++    bump_content_gen_within(node, true);
+     er_mark_dirty_upward_visual(node);
+ }
+ 
+@@ -619,7 +655,7 @@
+  */
+ static void mark_reflow_upward(ERNode* node)
+ {
+-    s_content_gen++; /* a reflow does change rendered content, so the fade cache must drop */
++    bump_content_gen_within(node, true); /* a reflow does change rendered content: the cache must drop */
+     if (node && node->subtree_hidden)
+         return; /* same reasoning as er_mark_dirty_upward_visual: a hidden node can never clear it */
+     stamp_content_upward(node);
+@@ -1781,6 +1817,7 @@
+ #if ER_FADE_CACHE_ENABLED
+ static uint32_t s_fade_cache[(size_t)ERUI_FADE_CACHE_H * ERUI_FADE_CACHE_W];
+ static uint16_t s_fade_cache_tag = 0xFFFFu; /* owning node; 0xFFFF = invalid */
++static uint32_t s_fade_cache_used = 0;      /* s_commit_seq of the owner's last capture or hit */
+ static uint32_t s_fade_cache_gen = 0;       /* s_content_gen at capture */
+ static int s_fade_cache_w = 0;
+ static int s_fade_cache_h = 0;
+@@ -2040,9 +2077,17 @@
+     if (s_fade_cache_tag == n->tag && s_fade_cache_gen == s_content_gen && s_fade_cache_w == w && s_fade_cache_h == h)
+     {
+         er_blit_blend(s_fade_cache, ERUI_FADE_CACHE_W * (int)sizeof(uint32_t), alpha, px, py, w, h);
++        s_fade_cache_used = s_commit_seq;
+         return true;
+     }
+ 
++    /* A smaller group does not take the slot from a larger one that is still fading (composited this
++     * commit or the last): two fades would evict each other every frame and neither would hit. It
++     * takes the strip path, as without the cache. */
++    if (s_fade_cache_tag != 0xFFFFu && s_fade_cache_tag != n->tag && s_commit_seq - s_fade_cache_used <= 1U
++        && (long)w * h < (long)s_fade_cache_w * s_fade_cache_h)
++        return false;
++
+     /* Capture writes the one shared cache buffer — never safe from inside a parallel slice.
+      * Signal er_commit instead: if the content generation is still the same next commit (a pure
+      * opacity animation), it renders that one frame single-core so the capture can happen, and
+@@ -2074,6 +2119,7 @@
+     er_scratch_pop_base();
+ 
+     s_fade_cache_tag = n->tag;
++    s_fade_cache_used = s_commit_seq;
+     s_fade_cache_gen = s_content_gen;
+     s_fade_cache_w = w;
+     s_fade_cache_h = h;
+--- a/engine/tests/rendering/test_opacity.c
++++ b/engine/tests/rendering/test_opacity.c
+@@ -705,6 +705,90 @@
+         er_node_destroy(root);
+     }
+ 
++    /* -----------------------------------------------------------------------
++     * Fade cache scope: a change outside the fading group leaves its copy valid, and a change
++     * inside it, including a nested opacity value, must show. Same pixels with the cache off.
++     * ---------------------------------------------------------------------- */
++    reset(&tc);
++    {
++        er_reset();
++
++        ERNode* root = er_node_create(ER_NODE_VIEW);
++        ERProps rp = props_default();
++        rp.width = FB_W;
++        rp.height = FB_H;
++        rp.background_color = 0xFFFFFFFFU; /* white */
++        er_node_set_props(root, &rp);
++
++        ERNode* group = er_node_create(ER_NODE_VIEW);
++        ERProps gp = props_default();
++        gp.width = 16;
++        gp.height = 16;
++        gp.background_color = 0x00000000U;
++        er_node_set_props(group, &gp);
++
++        ERNode* child = er_node_create(ER_NODE_VIEW);
++        ERProps cp = props_default();
++        cp.width = 16;
++        cp.height = 16;
++        cp.background_color = 0xFFFF0000U; /* red */
++        er_node_set_props(child, &cp);
++
++        /* Outside the group, below it in the tree order: a 16x16 box at (16, 16). */
++        ERNode* other = er_node_create(ER_NODE_VIEW);
++        ERProps op = props_default();
++        op.width = 16;
++        op.height = 16;
++        op.position = ER_POS_ABSOLUTE;
++        op.left = 16;
++        op.top = 16;
++        op.background_color = 0xFF00FF00U; /* green */
++        er_node_set_props(other, &op);
++
++        er_tree_append_child(group, child);
++        er_tree_append_child(root, group);
++        er_tree_append_child(root, other);
++        er_tree_set_root(root);
++        er_commit();
++
++        ERAnimValueHandle alpha = er_anim_value_create(0.5f);
++        er_anim_value_bind(alpha, group, ER_PROP_OPACITY);
++        er_commit(); /* capture */
++        er_anim_value_set(alpha, 0.25f);
++        er_commit(); /* hit */
++        if (px(&tc, 2, 2) != 0xFFFFBFBFU)
++            return fail("fade cache scope: red at alpha 64");
++
++        /* A content change outside the group, mid-fade. */
++        op.background_color = 0xFF0000FFU; /* blue */
++        er_node_set_props(other, &op);
++        er_anim_value_set(alpha, 0.5f);
++        er_commit();
++        if (px(&tc, 2, 2) != 0xFFFF7F7FU)
++            return fail("fade cache scope: red at alpha 128 after a change outside the group");
++        if (px(&tc, 20, 20) != 0xFF0000FFU)
++            return fail("fade cache scope: the change outside the group must show");
++
++        /* A nested opacity value inside the group, mid-fade: the copy must not hide it. */
++        ERAnimValueHandle inner = er_anim_value_create(1.0f);
++        er_anim_value_bind(inner, child, ER_PROP_OPACITY);
++        er_commit();
++        er_anim_value_set(inner, 0.0f);
++        er_commit();
++        if (px(&tc, 2, 2) != 0xFFFFFFFFU)
++            return fail("fade cache scope: a nested opacity of 0 inside the group must show (stale cache?)");
++
++        er_anim_value_destroy(inner);
++        er_anim_value_destroy(alpha);
++        er_tree_remove_child(group, child);
++        er_tree_remove_child(root, group);
++        er_tree_remove_child(root, other);
++        er_node_destroy(child);
++        er_node_destroy(group);
++        er_node_destroy(other);
++        er_node_destroy(root);
++    }
++
+ #if ERUI_TRANSFORMS_FULL
+     /* -----------------------------------------------------------------------
+      * Transform inside a banded opacity group.

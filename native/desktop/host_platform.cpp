@@ -15,6 +15,7 @@
 #include <sys/resource.h>
 #include <sys/sysctl.h>
 #include <sys/wait.h>
+#include <cctype>
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
@@ -27,6 +28,22 @@ SDL_GameController* controller = nullptr;
 
 void sysctl_string(const char* name, char* out, std::size_t size) {
   if (sysctlbyname(name, out, &size, nullptr, 0) != 0) *out = '\0';
+}
+
+// PS5_REACT_CONSOLE_ID (32 hex digits) stands in for the OpenPSID; otherwise every preview shares
+// one fixed ID. An invalid value leaves the ID unknown, as an unreadable OpenPSID does on PS5.
+void environment_console_id(char* out, std::size_t size) {
+  const char* value = std::getenv("PS5_REACT_CONSOLE_ID");
+  if (!value || !*value) value = "70733572656163742d70726576696577"; // "ps5react-preview"
+  if (std::strlen(value) != 32 || std::strspn(value, "0123456789abcdefABCDEF") != 32) {
+    static bool warned = false;
+    if (!warned) std::fprintf(stderr, "PS5_REACT_CONSOLE_ID must be 32 hex digits; consoleId is null\n");
+    warned = true;
+    return;
+  }
+  if (size < 33) return;
+  for (int i = 0; i < 32; ++i) out[i] = static_cast<char>(std::tolower(static_cast<unsigned char>(value[i])));
+  out[32] = '\0';
 }
 
 // "pt_BR.UTF-8" → "pt-BR"; the C and POSIX locales name no language.
@@ -130,6 +147,7 @@ void device_info(DeviceInfo& info) {
     info.process_time = (static_cast<std::int64_t>(usage.ru_utime.tv_sec) + usage.ru_stime.tv_sec) * 1000000 +
                         usage.ru_utime.tv_usec + usage.ru_stime.tv_usec;
   environment_language(info.language, sizeof info.language);
+  environment_console_id(info.console_id, sizeof info.console_id);
 }
 
 bool foreground_user(User& user) {

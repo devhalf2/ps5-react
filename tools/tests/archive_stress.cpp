@@ -13,6 +13,7 @@
 #include <unistd.h>
 
 void archives::trace(const char*, const char*) {}
+bool archives::downloading() { return false; }
 bool archives::list_directory(const char* path, void (*visit)(const char*, void*), void* user) {
   DIR* d = opendir(path);
   if (!d) return false;
@@ -24,6 +25,7 @@ std::size_t archives::pipeline_bytes() {
   const char* v = std::getenv("ARCHIVE_PIPELINE_BYTES");
   return v ? std::strtoull(v, nullptr, 10) : 32u << 20;
 }
+bool archives::hold_memory(bool) { return true; }
 
 namespace {
 int open_descriptors() {

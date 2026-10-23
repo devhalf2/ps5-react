@@ -5,6 +5,7 @@
 #include "image_loader.hpp"
 #include "archives.hpp"
 #include "packages.hpp"
+#include "removals.hpp"
 #include "browser_capture.hpp"
 #include "app_config.hpp"
 #define SDL_MAIN_HANDLED
@@ -36,6 +37,7 @@ void er_register_assets(void);
 #include "js_profiler.hpp"
 #include "render_workers.hpp"
 #include "screenshot.hpp"
+#include "shader_layers.hpp"
 #include "text_shaper.hpp"
 #include "storage_stats.hpp"
 #include "directory_records.hpp"
@@ -70,7 +72,7 @@ constexpr std::pair<SDL_Keycode, HostAction> kKeyActions[] = {
   {SDLK_UP, HostAction::up}, {SDLK_DOWN, HostAction::down}, {SDLK_LEFT, HostAction::left},
   {SDLK_RIGHT, HostAction::right}, {SDLK_RETURN, HostAction::confirm}, {SDLK_SPACE, HostAction::confirm},
   {SDLK_BACKSPACE, HostAction::back}, {SDLK_q, HostAction::l1}, {SDLK_e, HostAction::r1}, {SDLK_z, HostAction::l2},
-  {SDLK_c, HostAction::r2}, {SDLK_t, HostAction::triangle}, {SDLK_f, HostAction::square},
+  {SDLK_c, HostAction::r2}, {SDLK_t, HostAction::triangle}, {SDLK_f, HostAction::square}, {SDLK_o, HostAction::options},
 };
 constexpr std::pair<SDL_GameControllerButton, HostAction> kButtonActions[] = {
   {SDL_CONTROLLER_BUTTON_DPAD_UP, HostAction::up}, {SDL_CONTROLLER_BUTTON_DPAD_DOWN, HostAction::down},
@@ -78,6 +80,7 @@ constexpr std::pair<SDL_GameControllerButton, HostAction> kButtonActions[] = {
   {SDL_CONTROLLER_BUTTON_A, HostAction::confirm}, {SDL_CONTROLLER_BUTTON_B, HostAction::back},
   {SDL_CONTROLLER_BUTTON_LEFTSHOULDER, HostAction::l1}, {SDL_CONTROLLER_BUTTON_RIGHTSHOULDER, HostAction::r1},
   {SDL_CONTROLLER_BUTTON_Y, HostAction::triangle}, {SDL_CONTROLLER_BUTTON_X, HostAction::square},
+  {SDL_CONTROLLER_BUTTON_START, HostAction::options},
 };
 
 float stick(SDL_GameController* controller, SDL_GameControllerAxis axis) {
@@ -139,6 +142,8 @@ struct Host {
   struct Wait { int client; Uint32 until; };
   std::vector<Wait> waits;
   Uint32 slow_frame_us = 33000;
+  struct Shot { int client; std::string path; int step; };
+  std::vector<Shot> pending_shots;
   SDL_Scancode held_key = SDL_SCANCODE_UNKNOWN;
   SDL_GameControllerButton held_button = SDL_CONTROLLER_BUTTON_INVALID;
   GcScheduler gc_scheduler{now_us};
@@ -150,6 +155,7 @@ struct Host {
     archives::stop();
     browser_capture::stop();
   packages::stop();
+  removals::stop();
   network::stop();
     if (runtime_started) er_runtime_shutdown();
     text_shaper::shutdown();
@@ -310,7 +316,9 @@ struct Host {
         // `shot <path> full` keeps the framebuffer's full resolution, for images meant to be shown.
         const bool full = arg.size() > 5 && arg.ends_with(" full");
         const std::string path = full ? arg.substr(0, arg.size() - 5) : arg;
-        Control::reply(client, save_screenshot(path.c_str(), full ? 1 : 2) ? path : std::string("error: ") + std::strerror(errno));
+        // Shader layers exist only on the GPU: read the presented frame back after this frame's draw.
+        if (shader_layers::active()) pending_shots.push_back({client, path, full ? 1 : 2});
+        else Control::reply(client, save_screenshot(path.c_str(), full ? 1 : 2) ? path : std::string("error: ") + std::strerror(errno));
       } else if (verb == "snapshot") {
         Control::reply(client, call_js("__ps5ReactInspect", nullptr));
       } else if (verb == "focus") {
@@ -398,6 +406,8 @@ struct Host {
     stats.lap(FrameStats::input, now_us());
     er_perf_phase_begin(ER_PERF_PHASE_JS);
     er_runtime_pump();
+    // From the previous frame's step to this one's, so the frame time includes the swap's vsync wait
+    // (from the end of the previous frame, it was only the few ms since that wait).
     const std::int64_t step_us = now_us();
     const bool stepped = ps5_react_frame(er_runtime_context(), std::min(50.0, (step_us - previous_step_us) / 1000.0));
     previous_step_us = step_us;
@@ -424,6 +434,14 @@ struct Host {
       if (!presenter.draw(er_software_framebuffer(), damage_tracker_rects(), damage_tracker_moves(), sw, sh)) return false;
       er_perf_phase_end(ER_PERF_PHASE_PRESENT);
       damage_tracker_clear();
+      for (const Shot& shot : pending_shots) {
+        std::vector<std::uint32_t> pixels = read_back(sw, sh);
+        // At another drawable size than the framebuffer (a resized window) the shot is the drawable.
+        const int step = sw == width && sh == height ? shot.step : 1;
+        Control::reply(shot.client, !pixels.empty() && save_screenshot(shot.path.c_str(), pixels.data(), sw, sh, step)
+                                      ? shot.path : std::string("error: cannot save ") + shot.path);
+      }
+      pending_shots.clear();
     }
     stats.lap(FrameStats::present, now_us());
     if (swap) SDL_GL_SwapWindow(window);
@@ -449,6 +467,19 @@ struct Host {
       }
     }
     return !*er_runtime_last_error();
+  }
+
+  // The back buffer as top-down 0xAARRGGBB words.
+  static std::vector<std::uint32_t> read_back(int sw, int sh) {
+    std::vector<std::uint32_t> pixels(static_cast<std::size_t>(sw) * sh);
+    glPixelStorei(GL_PACK_ALIGNMENT, 4);
+    glReadBuffer(GL_BACK);
+    glReadPixels(0, 0, sw, sh, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, pixels.data());
+    if (glGetError() != GL_NO_ERROR) return {};
+    for (int y = 0; y < sh / 2; ++y)
+      std::swap_ranges(pixels.begin() + static_cast<std::ptrdiff_t>(y) * sw, pixels.begin() + static_cast<std::ptrdiff_t>(y + 1) * sw,
+                       pixels.begin() + static_cast<std::ptrdiff_t>(sh - 1 - y) * sw);
+    return pixels;
   }
 
   bool snapshot(const char* path) {
@@ -512,12 +543,114 @@ bool color_test(Host& host) {
   return glGetError() == GL_NO_ERROR;
 }
 
+// Shader layers: a layer compiles and draws through a transparent framebuffer rect, premultiplied UI
+// blends over it, a uniform update changes it, a bad shader reports its info log and draws nothing.
+bool shader_test(Host& host) {
+  JSContext* ctx = er_runtime_context();
+  const auto eval = [&](const char* script) {
+    JSValue result = JS_Eval(ctx, script, std::strlen(script), "shader-test.js", JS_EVAL_TYPE_GLOBAL);
+    std::string text;
+    if (JS_IsException(result)) {
+      JSValue error = JS_GetException(ctx);
+      const char* message = JS_ToCString(ctx, error);
+      std::fprintf(stderr, "Shader test: %s\n", message ? message : "exception");
+      JS_FreeCString(ctx, message);
+      JS_FreeValue(ctx, error);
+    } else if (const char* value = JS_ToCString(ctx, result)) {
+      text = value;
+      JS_FreeCString(ctx, value);
+    }
+    JS_FreeValue(ctx, result);
+    return text;
+  };
+  if (eval(R"JS((() => {
+    const shader = globalThis.__ps5ReactNative.shader;
+    globalThis.__shaderTest = {
+      good: shader.create('uniform vec4 uColor; uniform vec2 uResolution; out vec4 c;' +
+                          'void main() { c = gl_FragCoord.x < uResolution.x ? uColor : vec4(1.0); }'),
+      bad: shader.create('#version 410 core\nout vec4 c; void main() { c = undefinedName; }'),
+    };
+    shader.update(__shaderTest.good, {x: 200, y: 200, width: 400, height: 200, resolutionScale: 0.5,
+                                      uniforms: {uColor: [0, 1, 0, 1]}});
+    shader.update(__shaderTest.bad, {x: 800, y: 200, width: 200, height: 200});
+    for (const bad of [() => shader.update(__shaderTest.good, {resolutionScale: 2}),
+                       () => shader.update(__shaderTest.good, {uniforms: {uColor: 'red'}}),
+                       () => shader.update(9999, {})]) {
+      try { bad(); return 'accepted a bad update'; } catch (error) { if (!error.message.includes('shader.')) return error.message; }
+    }
+    return 'ok';
+  })())JS") != "ok") return false;
+  // Opaque red with two holes, and a 50% premultiplied white strip inside the first.
+  std::vector<std::uint32_t> frame(static_cast<std::size_t>(width) * height, 0xffff0000u);
+  const auto fill = [&](int x0, int y0, int x1, int y1, std::uint32_t value) {
+    for (int y = y0; y < y1; ++y) std::fill(frame.begin() + y * width + x0, frame.begin() + y * width + x1, value);
+  };
+  fill(200, 200, 600, 400, 0);
+  fill(200, 380, 600, 400, 0x80808080u);
+  fill(800, 200, 1000, 400, 0);
+  int sw = 0, sh = 0;
+  SDL_GL_GetDrawableSize(host.window, &sw, &sh);
+  const float scale = std::min(float(sw) / width, float(sh) / height);
+  const auto pixel = [&](int x, int y) {
+    unsigned char p[4] = {};
+    const int px = (sw - int(width * scale)) / 2 + int((x + 0.5f) * scale);
+    const int py = (sh - int(height * scale)) / 2 + int((y + 0.5f) * scale);
+    glReadPixels(px, sh - 1 - py, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, p);
+    return (std::uint32_t(p[0]) << 16) | (std::uint32_t(p[1]) << 8) | p[2];
+  };
+  const auto near = [](std::uint32_t a, std::uint32_t b) {
+    for (int s = 0; s < 24; s += 8) if (std::abs(int((a >> s) & 255) - int((b >> s) & 255)) > 3) return false;
+    return true;
+  };
+  if (!host.presenter.draw(frame.data(), sw, sh)) return false;
+  const std::uint32_t green = pixel(400, 300), blend = pixel(400, 390), outside = pixel(100, 100), failed = pixel(900, 300);
+  eval("__ps5ReactNative.shader.update(__shaderTest.good, {uniforms: {uColor: [0, 0, 1, 1]}})");
+  if (!host.presenter.draw(frame.data(), sw, sh)) return false;
+  const std::uint32_t blue = pixel(400, 300);
+  const std::string error = eval("__ps5ReactNative.shader.error(__shaderTest.bad) || ''");
+  const bool ok = near(green, 0x00ff00) && near(blend, 0x80ff80) && near(outside, 0xff0000) && near(failed, 0) &&
+                  near(blue, 0x0000ff) && error.find("undefinedName") != std::string::npos;
+  eval("__ps5ReactNative.shader.destroy(__shaderTest.good); __ps5ReactNative.shader.destroy(__shaderTest.bad)");
+  if (!host.presenter.draw(frame.data(), sw, sh) || !near(pixel(400, 300), 0)) return false;
+  if (!ok) std::fprintf(stderr, "Shader test: green %06x blend %06x outside %06x failed %06x blue %06x error '%s'\n",
+                        green, blend, outside, failed, blue, error.c_str());
+  else std::puts("PASS: shader layers compile, draw under a framebuffer cutout and blended UI, update uniforms, report GLSL errors.");
+  return ok;
+}
+
 bool press(Host& host, SDL_Keycode key, int focus, int count, int detail) {
   SDL_Event event = {};
   event.type = SDL_KEYDOWN; event.key.keysym.sym = key;
   if (SDL_PushEvent(&event) != 1) return false;
   for (int i = 0; i < 4; ++i) if (!host.frame()) return false;
   return expect(focus, count, detail);
+}
+
+// DeviceInfo consoleId: the fixed preview ID, PS5_REACT_CONSOLE_ID lowercased, null when invalid.
+bool console_id_test() {
+  const char* saved = std::getenv("PS5_REACT_CONSOLE_ID");
+  const std::string original = saved ? saved : "";
+  const auto id = [](const char* value) {
+    if (value) setenv("PS5_REACT_CONSOLE_ID", value, 1);
+    else unsetenv("PS5_REACT_CONSOLE_ID");
+    host::DeviceInfo info;
+    host::device_info(info);
+    return std::string(info.console_id);
+  };
+  const bool ok = id(nullptr) == "70733572656163742d70726576696577" &&
+                  id("0123456789ABCDEF0123456789abcdef") == "0123456789abcdef0123456789abcdef" &&
+                  id("0123456789abcdef").empty() && id("0123456789abcdef0123456789abcdeg").empty();
+  id("00112233445566778899aabbccddeeff");
+  JSContext* ctx = er_runtime_context();
+  constexpr char script[] =
+    "globalThis.__ps5ReactNative.device.info().consoleId === '00112233445566778899aabbccddeeff'";
+  JSValue result = JS_Eval(ctx, script, sizeof script - 1, "console-id-test.js", JS_EVAL_TYPE_GLOBAL);
+  const bool bound = !JS_IsException(result) && JS_ToBool(ctx, result) == 1;
+  JS_FreeValue(ctx, result);
+  if (saved) setenv("PS5_REACT_CONSOLE_ID", original.c_str(), 1);
+  else unsetenv("PS5_REACT_CONSOLE_ID");
+  if (!ok || !bound) std::fprintf(stderr, "Console ID test failed (host %d, binding %d)\n", ok, bound);
+  return ok && bound;
 }
 
 bool storage_test() {
@@ -616,6 +749,8 @@ bool storage_test() {
       const large = 'x'.repeat(3 * 1024 * 1024 + 7);
       fs.writeFile(testPath, large, false);
       if (fs.readFile(testPath) !== large) return false;
+      fs.writeFile(testPath, 'synced', false, true);
+      if (fs.readFile(testPath) !== 'synced') return false;
     } finally { fs.remove(testPath); }
     // removeTree deletes the tree but only unlinks the symbolic link set up below, keeping its target.
     fs.removeTree('/download0/remove-tree-test');
@@ -673,8 +808,9 @@ bool storage_test() {
 }
 
 bool self_test(Host& host) {
-  if (!storage_test()) return false;
+  if (!storage_test() || !console_id_test()) return false;
   for (int i = 0; i < 4; ++i) if (!host.frame()) return false;
+  if (!shader_test(host)) return false;
   if (!expect(0, 0, 0) || !host.snapshot("texture-initial.ppm")) return false;
   if (!press(host, SDLK_RETURN, 0, 1, 1) || !host.snapshot("texture-increment.ppm") ||
       !press(host, SDLK_BACKSPACE, 0, 1, 0) || !press(host, SDLK_RIGHT, 1, 1, 0) ||
@@ -758,4 +894,6 @@ int main(int argc, char** argv) {
 
 void archives::trace(const char*, const char*) {}
 std::size_t archives::pipeline_bytes() { return 32 * 1024 * 1024; }
+bool archives::hold_memory(bool hold) { images::hold_memory(hold); return true; }
+bool archives::downloading() { return network::downloading(); }
 bool archives::list_directory(const char* path, void (*visit)(const char*, void*), void* user) { return host::read_dir(path, visit, user); }

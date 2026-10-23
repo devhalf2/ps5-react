@@ -8,8 +8,9 @@ apps/<app>/index.jsx                 application, state, components
 runtime/js (@ps5-react/core)         focus navigation, controller API, native modules, primitives
             ↓ React reconciler / NativeUI / QuickJS
 Embedded React C                    tree, layout, text, rasterization
-            ↓ opaque ARGB8888 framebuffer
-native/shared/GlPresenter           changed rows into buffer textures (1:1) or a texture, presentation
+            ↓ ARGB8888 framebuffer (opaque, except ShaderView cutouts)
+native/shared/GlPresenter           shader layers, then changed rows into buffer textures (1:1) or a
+                                     texture blended over them, presentation
             ↓
 native/desktop | native/ps5          window/EGL, input, clock, lifecycle,
                                      native modules via native/shared/host_api
@@ -39,7 +40,21 @@ presenter first draws those images as textured quads, uploaded once per image,
 then the framebuffer over them with premultiplied blending; the engine leaves
 their rects transparent and keeps what it draws over them in the alpha channel.
 Every other pixel is still rasterized on the CPU. The presenter
-has no knowledge of React state, fonts, or widgets. The engine and JavaScript
+has no knowledge of React state, fonts, or widgets.
+
+GPU shader layers (`ShaderView`, [SHADERS.md](SHADERS.md)) are drawn the same
+way, underneath. A `ShaderView` is a View whose rect the
+rasterizer clears to transparent (a cutout) before painting its children; the
+software backend composites alpha with color, so the framebuffer holds
+premultiplied pixels there and stays opaque everywhere else. While any layer is
+live, the presenter renders each one (`native/shared/shader_layers.cpp`) into its
+own target, composites it at its rect, then draws image layers and blends the
+framebuffer over all of them, so UI painted after a `ShaderView` stays on top.
+This was picked over
+rasterizing separate UI layers per shader: it costs one clear per cutout on the
+CPU and one blend on the GPU, needs no second framebuffer, and leaves frames
+without a layer on the old path. Layers animate from `uTime`, set by the
+presenter, so neither JavaScript nor the damage tracker runs for them. The engine and JavaScript
 run on the same render thread. The PS5 host keeps the heap, shims, CRT, SDK
 pair, and FSELF path used by the hardware-tested proof of concept.
 

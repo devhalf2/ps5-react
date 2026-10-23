@@ -18,7 +18,7 @@ export function scrolledBy(rect, frame) {
 
 /** `rect` as `frame` is currently displayed, rather than its animation target. */
 function displayedScrolledBy(rect, frame) {
-  const [x, y] = frame.timer !== null && frame.position ? frame.position : [frame.x, frame.y];
+  const [x, y] = frame.timer != null && frame.position ? frame.position : [frame.x, frame.y];
   return {...rect, x: rect.x - x, y: rect.y - y};
 }
 

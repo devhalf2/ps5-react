@@ -17,7 +17,7 @@ Controller.setLightBar('#38bdf8');
 ## Contract
 
 The modules in `runtime/js/native.js` wrap `globalThis.__ps5ReactNative`, which
-each host installs before the bundle runs. Its exact shape (ABI v5) is
+each host installs before the bundle runs. Its exact shape (ABI v10) is
 documented in [`native/shared/host_api.hpp`](../native/shared/host_api.hpp).
 `native/shared/host_api.cpp` implements the filesystem with POSIX and the object
 itself; `native/ps5/` and `native/desktop/` implement the platform functions.
@@ -65,8 +65,21 @@ const label = Platform.select({ps5: 'Console', desktop: 'Preview', default: 'Unk
 | `freeMemory` | bytes | Memory available to the app |
 | `processTime` | µs | CPU time used by this process |
 | `language` | string | System language as a BCP 47 tag (`en-US`, `pt-BR`, `zh-Hans`) |
+| `consoleId` | string | The console's OpenPSID (`sceKernelGetOpenPsId`) as 32 lowercase hex digits, fixed per console; see below |
 
 Any value the host cannot read is `null`.
+
+`consoleId` identifies the console, not the user, and is the same for every
+title. Treat it as personal data: to bind something to a console, send a hash
+of it salted for your app rather than the ID itself. On PS5 it is read once per
+launch: from `sceKernelGetOpenPsId`, looked up in `libkernel_sys.sprx`,
+`libkernel.sprx` and `libkernel_web.sprx` in turn, else from the kernel's
+`machdep.openpsid` sysctl (the same 16 bytes). The kernel log names the source
+(`consoleId <first 4 digits>... (OpenPSID via <source>)`). When neither answers,
+it is `null` and the title keeps running. The desktop preview returns `PS5_REACT_CONSOLE_ID` when that holds 32
+hex digits (lowercased), a fixed preview ID
+(`70733572656163742d70726576696577`) when it is unset, and `null` when it is
+set to anything else, which lets you exercise the unknown case.
 
 ## FileSystem
 
@@ -88,11 +101,12 @@ inside it can be read by path. Paths containing `..` components are rejected.
 | `stat(path)` | `FileStat \| null` | `null` when the path does not exist |
 | `exists(path)` | `boolean` | `stat(path) !== null` |
 | `readFile(path)` | `string` | UTF-8; throws above 8 MiB |
-| `writeFile(path, text)` | — | Creates or truncates |
+| `writeFile(path, text, {sync})` | — | Creates or truncates; `sync: true` flushes it to the disk before returning, for a file saved then renamed into place |
 | `appendFile(path, text)` | — | Creates or appends |
 | `mkdir(path, {recursive})` | — | `recursive` defaults to `false` |
 | `remove(path)` | — | A file or an empty directory |
 | `removeTree(path)` | — | A file, or a directory and everything in it; symbolic links are unlinked, never followed. Synchronous: for small app-owned trees |
+| `removeAsync(path)` | `Promise<void>` | What `removeTree` removes, on a worker thread, one path at a time in the order asked. Resolves once the path is gone, or if it never existed; rejects with an `Error` naming the path and the system error. For large files and trees, whose removal holds the screen for seconds |
 | `rename(from, to)` | — | Both are app paths |
 | `chmod(path, mode)` | — | Permission bits, such as `0o777`; a file or directory the console's own services must read (a title's files) needs them open to every user |
 | `mounts()` | `{device, path, type}[]` | Up to 64 mounted filesystems visible to this process, as host paths; see [Hardware status](#hardware-status) |
@@ -138,6 +152,8 @@ headers include `etag` and `last-modified` for stable file identity checks.
 `Downloads.enqueue({url, destination, ...options})` returns a cancellable task
 with progress subscriptions and a completion promise. Binary downloads stay
 native, use parallel validated ranges when eligible, and resume durable ranges.
+Progress snapshots carry `written`, the live disk count, and `completedBytes`,
+the bytes of whole ranges a resume keeps; show resumable progress from the latter.
 `Downloads.enqueueManifest({manifest, destination, ...options})` supports split
 byte manifests with per-piece SHA-1 and whole-file SHA-256 verification.
 `DownloadFormats` validates manifests and routes image, package, archive and
@@ -332,7 +348,8 @@ title can load these modules; when one cannot, only the dependent call degrades:
 
 | Call | Module | Without it |
 | --- | --- | --- |
-| `DeviceInfo.get().model` | `libkernel_sys.sprx` | `null` |
+| `DeviceInfo.get().model` | `libkernel_sys.sprx`, `libkernel.sprx` or `libkernel_web.sprx` | `null` |
+| `DeviceInfo.get().consoleId` | The same, else the `machdep.openpsid` sysctl | `null` |
 | `Notifications.show()` | `libSceNotification.sprx` | Returns `false` |
 
 PS5 `diskUsage()` uses the native-title `_fstatfs` export on a descriptor opened
@@ -432,6 +449,13 @@ directory only after successful reading and SHA-256 output receipts. A matching
 published directory is reverified; matching interrupted staging is restarted.
 Unowned destinations/staging are preserved. Image artifacts are flattened to the
 output root for ShadowMount scan depth; duplicate filenames fail without overwrite.
+`artifacts` lists the images (by extension) and the packages: files named `.pkg`
+or `.fpkg`, in any case, that start with the PKG signature (`\x7FCNT`); a file
+so named that is something else is left out. The receipt is streamed to disk a
+line per file, so its size does not limit the number of files (an archive may
+still hold at most 100,000 entries). Extracted folders are mode 0755, `eboot.bin` and
+`.elf`/`.self`/`.prx`/`.sprx` files (or any the archive marks executable) 0755,
+and other files 0644, whatever the process umask.
 
 `password` is optional, with at most 1024 UTF-8 bytes and no NUL. Wrong or missing
 passwords fail without publishing partial output or removing source volumes.
@@ -453,22 +477,55 @@ read to refuse archives whose declared decoder windows (7z LZMA/LZMA2/PPMd/zstd
 and BCJ2 buffers, RAR5 windows, RAR PPMd, ZIP LZMA/XZ/zstd/PPMd, and an outer
 xz/zstd/lzip/lzma layer) exceed 64 MiB, since libarchive has no memory limit
 and the title's heap is fixed. That budget assumes nothing else large runs during extraction: don't
-extract while downloading. Self-extracting executables are refused. This API does not install PKGs or
+extract while downloading. A 7z refused for that alone, whose largest folder declares at most 288 MiB
+(the 256 MiB LZMA2 dictionary repacks use), is extracted by `rar-extract` instead, in a process of its
+own started through the payload loader, with the console's memory rather than the title's heap. It first
+takes that memory and writes to every page; when the console needs over a second to hand it over (it is
+freeing memory from everything else: a probe froze a console from 512 MiB on), it fails with "The console
+has too little free memory to extract this archive now. Close other apps and retry." before decoding.
+Without a payload loader it fails with "This archive needs the payload loader to extract: none answered
+on port 9021." Over 288 MiB the memory refusal stands. Self-extracting executables are refused. This API does not install PKGs or
 register games. Desktop extraction and successful PS5 linking are not console
 execution evidence.
 
-`Archives.inspect(sources)` reads a few headers synchronously and returns
-`{kind, refusal}`. `kind` names the leading bytes: `rar`, `7z`, `zip`, `tar`,
+`Archives.inspect(sources)` returns `{kind, refusal}` synchronously. The headers
+are read on a worker thread and the call waits at most about 25 ms: a download
+writing to the same drive can hold a read for seconds. When the read is still
+running, the result also has `pending: true` and carries the previous answer for
+the same sources (empty strings when there is none); the read finishes in the
+background and the next call with those sources returns it. Call again later
+rather than treating a pending empty `kind` as an answer. `kind` names the leading bytes: `rar`, `7z`, `zip`, `tar`,
 `tar.gz`, `tar.bz2`, `tar.xz`, `tar.zst`, `pkg` (`\x7FCNT`), `exfat`, `ffpkg` (a
 UFS2 superblock), `ffpfs`, `ffpfsc`, or `''`. For an archive, `refusal` is the
 decoder-memory message above when the headers read so far already declare a
-window over 64 MiB: a RAR's first file header, or an xz/zstd first block. It
+window over 64 MiB: an xz/zstd first block, or a RAR's file headers. A RAR's
+first file header is always read; the walk then stops at the first header it
+reaches after about 100 ms (each sits after the previous file's data, so a
+volume of many files may be cut short). An extraction refuses the rest: its
+preflight reads every header, and in a streamed set, which is checked by
+`inspect` too, the RAR worker refuses any later header over its limits. It
 works on a download's growing `.part` file: a hole or a missing end is not an
 error, so a first volume can be refused before the remaining volumes download.
 7z and ZIP keep their directories at the end and show no refusal until complete.
 An empty kind is not proof of anything; image kinds are recognized by superblock
 magic only, not validated as mountable.
 
+
+## Shaders (ABI v10)
+
+`ShaderView` and `BootIntro` ([SHADERS.md](SHADERS.md)) use
+`__ps5ReactNative.shader`; apps use the components, not the namespace.
+
+| Call | Notes |
+| --- | --- |
+| `shader.create(source)` | Layer ID for GLSL 4.10 core fragment source (a missing `#version` line is added); compiled when the presenter first draws it. At most 8 layers and 64 KB of source. |
+| `shader.update(id, options)` | `{x, y, width, height}` in framebuffer pixels, `opacity` 0–1, `resolutionScale` 0.05–1, `uniforms` `{name: number \| [2–4 numbers]}` (at most 16). All optional; a bad option throws and changes nothing. |
+| `shader.destroy(id)` | Deletes the layer; its GL objects go on the next frame. |
+| `shader.error(id)` | The GLSL info log of a failed compile or link, else `null`. |
+
+Errors name the call and the layer: `shader.update 3: resolutionScale must be 0.05 to 1`.
+Both hosts implement it in `native/shared/shader_layers.cpp`, with the same GL. The desktop
+self-test compiles a layer and reads back its pixels; not yet confirmed on hardware.
 
 ## Browser download capture (ABI v7)
 

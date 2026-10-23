@@ -1,0 +1,212 @@
+Embedded React: a View `cutout` that leaves a transparent hole in the framebuffer.
+
+Modified from Embedded React (Apache-2.0, Copyright 2026 Cory Lamming) at the
+revision pinned in dependencies.lock.json, after the patches listed before this
+one there. Changed files: backends/software/renderer_backend.c,
+bridges/quickjs/js/src/embedded-react/index.d.ts,
+bridges/quickjs/native_ui_bridge.c, engine/core/native_renderer.c,
+engine/core/renderer_internal.h, engine/include/er_scene.h,
+engine/include/native_renderer.h, engine/scene/compositor.c and
+engine/scene/er_node_internal.h. Not yet proposed upstream.
+
+A host that draws GPU layers under the software framebuffer needs the
+rasterizer to leave their rects see-through while still painting the UI above
+them. A View with `cutout: true` now sets its clipped rect to transparent
+(0x00000000) through a new optional backend callback, clear_rect, before its
+background and children paint; the call is skipped in banded mode and inside
+scratch captures. The software backend's source-over now composites alpha as
+well as color, so content drawn over a cleared pixel keeps its own coverage
+and is premultiplied for the host's blend. Over an opaque pixel the result is
+bit-identical to before (alpha stays 0xFF), so frames without a cutout do not
+change. A cutout node no longer counts as painting nothing.
+
+diff --git a/backends/software/renderer_backend.c b/backends/software/renderer_backend.c
+index df48f33..cd1ce58 100644
+--- a/backends/software/renderer_backend.c
++++ b/backends/software/renderer_backend.c
+@@ -60,8 +60,9 @@ static inline uint32_t div255(uint32_t x)
+  * @brief Composites one premultiplied-ARGB source pixel over a premultiplied destination pixel (Porter-Duff
+  *        source-over).
+  *
+- * The alpha channel is blended like the colours, so an opaque destination stays exactly 0xFF and a pixel
+- * cleared for a host layer (er_blit_clear) keeps the coverage drawn over it.
++ * The framebuffer is opaque except where a host layer (er_blit_clear) or a cutout cleared it; alpha is
++ * composited like the colors, so an opaque destination stays 0xFF and a cleared one keeps the coverage
++ * drawn over it.
+  *
+  * @param[in] dst  Destination pixel (premultiplied ARGB8888).
+  * @param[in] sa   Source alpha (premultiply coverage).
+@@ -69,7 +70,7 @@ static inline uint32_t div255(uint32_t x)
+  * @param[in] sg   Premultiplied source green.
+  * @param[in] sb   Premultiplied source blue.
+  *
+- * @return The blended ARGB8888 pixel.
++ * @return The blended premultiplied ARGB8888 pixel.
+  */
+ static inline uint32_t over_premul(uint32_t dst, uint32_t sa, uint32_t sr, uint32_t sg, uint32_t sb)
+ {
+@@ -129,7 +130,7 @@ static inline __m256i scale8(__m256i px, __m256i f_lo, __m256i f_hi)
+     return _mm256_packus_epi16(lo, hi);
+ }
+ 
+-/** @brief over_premul() of eight premultiplied sources onto eight destinations. */
++/** @brief over_premul() of eight premultiplied sources onto eight destinations, alpha included. */
+ static inline __m256i over8(__m256i s, __m256i d)
+ {
+     const __m256i full = _mm256_set1_epi16(255);
+@@ -397,7 +398,8 @@ static void move_rect_cb(int src_x, int src_y, int w, int h, int dst_x, int dst_
+     }
+ }
+ 
+-/** @brief Sets a framebuffer rect to transparent black, where a host layer shows through (er_blit_clear). */
++/** @brief Sets a clipped framebuffer rect to transparent black, where a host layer (er_blit_clear) or a
++ *        cutout shows through. */
+ static void clear_rect_cb(int x, int y, int w, int h, void* ctx)
+ {
+     SoftCtx* c = ctx;
+diff --git a/bridges/quickjs/js/src/embedded-react/index.d.ts b/bridges/quickjs/js/src/embedded-react/index.d.ts
+index ba01ef5..4aa5ec9 100644
+--- a/bridges/quickjs/js/src/embedded-react/index.d.ts
++++ b/bridges/quickjs/js/src/embedded-react/index.d.ts
+@@ -182,6 +182,9 @@ export interface ViewStyle {
+   // Paint.
+   backgroundColor?: string | AnimatedValue;
+   backgroundGradient?: BackgroundGradient;
++  /** Clears the View's rect (clipped, square corners) to transparent before its background and children
++   *  paint, so a host layer composited under the framebuffer shows through. */
++  cutout?: boolean;
+   opacity?: number | AnimatedValue;
+ 
+   // Border sweep: a light travelling around the rounded edge, over the content.
+diff --git a/bridges/quickjs/native_ui_bridge.c b/bridges/quickjs/native_ui_bridge.c
+index f6bbe74..2366dd3 100644
+--- a/bridges/quickjs/native_ui_bridge.c
++++ b/bridges/quickjs/native_ui_bridge.c
+@@ -1151,6 +1151,7 @@ typedef enum
+     PROP_DELAY_LONG_PRESS,
+     PROP_ASPECT_RATIO,
+     PROP_BACKGROUND_COLOR,
++    PROP_CUTOUT,
+     PROP_OPACITY,
+     PROP_BORDER_RADIUS,
+     PROP_BORDER_TOP_LEFT_RADIUS,
+@@ -1284,6 +1285,7 @@ static const char* const k_prop_names[PROP_COUNT_] = {
+     [PROP_DELAY_LONG_PRESS] = "delayLongPress",
+     [PROP_ASPECT_RATIO] = "aspectRatio",
+     [PROP_BACKGROUND_COLOR] = "backgroundColor",
++    [PROP_CUTOUT] = "cutout",
+     [PROP_OPACITY] = "opacity",
+     [PROP_BORDER_RADIUS] = "borderRadius",
+     [PROP_BORDER_TOP_LEFT_RADIUS] = "borderTopLeftRadius",
+@@ -2409,6 +2411,10 @@ static void apply_props(JSContext* ctx, ERNode* node, JSValueConst obj)
+ 
+     /* View visual. */
+     ER_COL(PROP_BACKGROUND_COLOR, background_color);
++    if (!JS_IsUndefined(s_prop_slots[PROP_CUTOUT]))
++    {
++        p.cutout = JS_ToBool(ctx, s_prop_slots[PROP_CUTOUT]) > 0;
++    }
+     apply_background_gradient(ctx, s_prop_slots[PROP_BACKGROUND_GRADIENT], &p);
+     apply_opacity(ctx, s_prop_slots[PROP_OPACITY], &p);
+     ER_DIM(PROP_BORDER_RADIUS, border_radius);
+diff --git a/engine/core/renderer_internal.h b/engine/core/renderer_internal.h
+index fe4f56a..6b6e342 100644
+--- a/engine/core/renderer_internal.h
++++ b/engine/core/renderer_internal.h
+@@ -290,9 +290,10 @@ void er_blit_copy(const void* src, int stride, int x, int y, int w, int h);
+ /**
+  * @brief Sets a rect, clipped like every blit, to transparent black: the hole a host layer shows through.
+  *
+- * Only the compositor's layer pass calls it, for a node it made a layer, and only when the backend has
+- * clear_rect (er_blit_can_clear). Inside a scratch capture it clears the scratch, which is never the case
+- * for a layer: no ancestor of one composites or transforms.
++ * The compositor's layer pass calls it for a node it made a layer, and a View with `cutout` for its rect;
++ * a no-op in banded mode and without clear_rect (er_blit_can_clear). Inside a scratch capture (opacity
++ * groups, transforms) it clears the scratch, which then blends over the framebuffer as nothing: the
++ * hole shows only outside such a group. No ancestor of a layer composites or transforms.
+  */
+ void er_blit_clear(int x, int y, int w, int h);
+ 
+diff --git a/engine/include/er_scene.h b/engine/include/er_scene.h
+index aa49438..50b6ed2 100644
+--- a/engine/include/er_scene.h
++++ b/engine/include/er_scene.h
+@@ -714,6 +714,8 @@ extern "C"
+ 
+         /* --- View visual --- */
+         uint32_t background_color;          /**< ARGB8888; 0x00000000 = transparent. */
++        uint8_t cutout; /**< 1 => the View first sets its rect (clipped, square corners) to transparent, so a
++                             host compositing under the framebuffer shows through; children paint over it. */
+         uint32_t border_color;              /**< ARGB8888 border color for all edges. */
+         int16_t border_width;               /**< Uniform border width in pixels; overridden by per-edge widths. */
+         int16_t border_radius;              /**< Uniform corner radius in pixels; overridden by per-corner radii. */
+diff --git a/engine/include/native_renderer.h b/engine/include/native_renderer.h
+index e3d506d..2b376fd 100644
+--- a/engine/include/native_renderer.h
++++ b/engine/include/native_renderer.h
+@@ -123,9 +123,10 @@ extern "C"
+ 
+         /*------------------------------------------------------------------------------------------------
+          - Clear (optional). Sets a framebuffer rect to transparent black (0x00000000), where a host layer
+-           (er_set_layers_enabled) shows through. A backend that has it must also blend the destination
+-           alpha (source-over on all four premultiplied channels), so what is drawn over the cleared rect
+-           keeps its coverage. Never called in banded mode. Leave NULL and no image becomes a layer.
++           (er_set_layers_enabled) or a View with `cutout` (see ERProps.cutout) shows through. A backend
++           that has it must also blend the destination alpha (source-over on all four premultiplied
++           channels), so what is drawn over the cleared rect keeps its coverage. Never called in banded
++           mode. Leave NULL and no image becomes a layer, and a cutout leaves its rect untouched.
+          ------------------------------------------------------------------------------------------------*/
+ 
+         /** @brief Set a framebuffer rect to 0x00000000. */
+diff --git a/engine/scene/compositor.c b/engine/scene/compositor.c
+index f0aed71..a10a008 100644
+--- a/engine/scene/compositor.c
++++ b/engine/scene/compositor.c
+@@ -704,6 +704,8 @@ void er_request_subtree_bounds_pass(void)
+  */
+ static void render_view_bg(const ERViewProps* vp, int px, int py, int w, int h)
+ {
++    if (vp->cutout)
++        er_blit_clear(px, py, w, h);
+     /* Resolve per-corner radii (0 = fall back to uniform border_radius). */
+     const int r_tl = vp->border_tl_radius > 0 ? (int)vp->border_tl_radius : (int)vp->border_radius;
+     const int r_tr = vp->border_tr_radius > 0 ? (int)vp->border_tr_radius : (int)vp->border_radius;
+@@ -3855,6 +3857,7 @@ void er_node_set_props(ERNode* node, const ERProps* props)
+         case ER_NODE_PRESSABLE:
+         case ER_NODE_FLAT_LIST:
+             node->props.view.background_color = props->background_color;
++            node->props.view.cutout = props->cutout;
+             node->props.view.border_color = props->border_color;
+             node->props.view.border_width = props->border_width;
+             node->props.view.border_radius = props->border_radius;
+@@ -5401,7 +5404,8 @@ static bool is_plain_container(const ERNode* a, int* border, int* radius)
+ static bool paints_nothing(const ERNode* a)
+ {
+     int border, radius;
+-    return is_plain_container(a, &border, &radius) && (a->props.view.background_color >> 24) == 0U && border == 0;
++    return is_plain_container(a, &border, &radius) && (a->props.view.background_color >> 24) == 0U && border == 0
++           && !a->props.view.cutout;
+ }
+ 
+ /**
+@@ -5420,7 +5424,7 @@ static bool paints_uniformly_over(const ERNode* a, int vx, int vy, int vw, int v
+     int border, radius;
+     if (!is_plain_container(a, &border, &radius))
+         return false;
+-    if ((a->props.view.background_color >> 24) == 0U && border == 0)
++    if ((a->props.view.background_color >> 24) == 0U && border == 0 && !a->props.view.cutout)
+         return true; /* paints nothing */
+     const int inset = border + radius;
+     int bx, by, bw, bh;
+diff --git a/engine/scene/er_node_internal.h b/engine/scene/er_node_internal.h
+index 6d3cc91..a6ec2e6 100644
+--- a/engine/scene/er_node_internal.h
++++ b/engine/scene/er_node_internal.h
+@@ -193,6 +193,7 @@ typedef struct
+ typedef struct
+ {
+     uint32_t background_color; /**< ARGB8888; 0x00000000 = transparent. */
++    uint8_t cutout;            /**< ERProps.cutout. */
+     uint32_t border_color;     /**< ARGB8888 uniform border color. */
+     int16_t border_width;      /**< Uniform border width in pixels. */
+     int16_t border_radius;     /**< Uniform corner radius in pixels. */

@@ -36,7 +36,11 @@
       "patches/embeddedReact-layers.patch",
       "patches/embeddedReact-offscreen-record.patch",
       "patches/embeddedReact-translate-copy.patch",
-      "patches/embeddedReact-batched-updates.patch"
+      "patches/embeddedReact-batched-updates.patch",
+      "patches/embeddedReact-font-gamma.patch",
+      "patches/embeddedReact-fade-cache-scope.patch",
+      "patches/embeddedReact-subpixel-letter-spacing.patch",
+      "patches/embeddedReact-view-cutout.patch"
     ]
   },
   "platform": {
@@ -107,6 +111,10 @@
     "NotoSansSC-Regular.otf": {
       "url": "https://raw.githubusercontent.com/notofonts/noto-cjk/f8d157532fbfaeda587e826d4cd5b21a49186f7c/Sans/SubsetOTF/SC/NotoSansSC-Regular.otf",
       "sha256": "faa6c9df652116dde789d351359f3d7e5d2285a2b2a1f04a2d7244df706d5ea9"
+    },
+    "NotoSansTC-Regular.otf": {
+      "url": "https://raw.githubusercontent.com/notofonts/noto-cjk/f8d157532fbfaeda587e826d4cd5b21a49186f7c/Sans/SubsetOTF/TC/NotoSansTC-Regular.otf",
+      "sha256": "5bab0cb3c1cf89dde07c4a95a4054b195afbcfe784d69d75c340780712237537"
     },
     "NotoSansJP-Regular.otf": {
       "url": "https://raw.githubusercontent.com/notofonts/noto-cjk/f8d157532fbfaeda587e826d4cd5b21a49186f7c/Sans/SubsetOTF/JP/NotoSansJP-Regular.otf",

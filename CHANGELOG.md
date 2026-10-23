@@ -1,5 +1,254 @@
 # Changelog
 
+## Unreleased — tester fixes
+
+- Downloads with `adaptive`: a 503 or 429 that comes while none of the origin's ranges is streaming no
+  longer halves its cap or pauses it for the whole Retry-After. New requests wait 5 s (or the Retry-After,
+  if shorter) and the cap stays; a request sent after that and turned away still pauses the origin until
+  the Retry-After ends. A tester's FileKeeper tunnel (`tunnel1.dlproxy.uk`, 54 GB file) held new requests
+  for a few seconds and answered them all 503 with Retry-After: 60 about every 90 s, whatever the connection
+  count, and served requests right after. Each episode that found nothing streaming halved the cap
+  (23, 11, 5, 2, 1) and paused the origin for a minute, so past the halfway mark the download sat at 0 KB/s
+  most of each minute on one connection.
+
+## Unreleased — fork port (Pandora 0.3.3)
+
+- `Http.request` and every task without a file destination run on a network thread of their own, apart
+  from file downloads. The one service ran its tasks one at a time, so while a download went on for
+  minutes every request waited behind it: an app's JSON from its server, a key check, an update check.
+  Task ids stay one sequence across both; only the download service starts and stops libSceNet and holds
+  the disk buffers, writer and sync threads, and only it sets `downloading()`. If the request thread cannot
+  start, requests queue behind downloads as before and the log says so. From MyLuxy/overdrive 0eea159.
+
+## Unreleased — fork port (Pandora 0.3.2)
+
+- The engine's image registry holds 512 images (was 256). It holds every decoded image, the decoded
+  cache's up to 256 and the app's baked ones, so a cache full of small images filled it, and each new image
+  after that was discarded with "Image.load: the engine image registry is full" and never drew. 512 slots
+  cost 45 KB. From MyLuxy/overdrive 7e905b9.
+- When the registry is full all the same, the image about to be published makes room: cached images
+  nothing holds are evicted, least recently used first, until it fits; only when every cached image is
+  held is it discarded. The `images:` stats line adds `cached`, `pinned` (held) and `registry` counts.
+  From MyLuxy/overdrive 16ef057.
+- `ReleaseImages` (`<ReleaseImages when={released}>`): while `when` is true the remote images under it stop
+  holding their decoded cache entries, except those on screen when it turned true. They stay mounted and are
+  taken again, without a re-render when still cached, once it turns false. Scopes nest. For a screen kept
+  mounted while hidden and for the parts of a long page far from focus (docs/IMAGES.md). From
+  MyLuxy/overdrive's engine, which the store-front image fixes there (ef1d389, 7e905b9) rely on.
+- `Archives.extract` accepts a 7z whose encoded header decodes to up to 32 MiB (was the 16 MiB metadata
+  limit): a game's file list in 7-Zip's default LZMA-compressed header passed it and was refused as
+  "Unsupported or incomplete archive.". From MyLuxy/overdrive 0e7112e (ElijaOwO).
+- A 7z whose decoder needs more than the title heap's 64 MiB, up to 288 MiB, is extracted by `rar-extract`
+  (a `7ZX1` request, `native/rar_worker/sevenzip.cpp`, libarchive) in its own process instead of being
+  refused: repacks set a 256 MiB LZMA2 dictionary. The preflight reports the memory a 7z declares
+  (`preflight(sources, seven_zip_memory)`). The worker takes the decoder's memory and touches every page
+  before decoding, and stops with "The console has too little free memory to extract this archive now."
+  when the console needs over a second to give it; without a payload loader it fails with "This archive
+  needs the payload loader to extract: none answered on port 9021." What both extractors share (report
+  lines, path and mode rules, SHA-256, the writer thread) moved from `rar_worker.cpp` to `worker_io.hpp`;
+  the 7z extractor keeps the RAR one's modes (folders and programs 0755, other files 0644). The desktop
+  worker links Homebrew's libarchive. From MyLuxy/overdrive adde740.
+- The `chinese-traditional` text font: Noto Sans TC 2.004, subset to Big5 level 1 (5,401 hanzi and its
+  symbols). Han characters take it first when the language is `zh-Hant` (or `zh` with region TW, HK or MO);
+  in other languages it comes after the simplified Chinese font and before the Japanese one. From
+  MyLuxy/overdrive 4d8388d (with Henianbin).
+
+## Unreleased — tester fixes (Pandora 0.3.0)
+
+- `DeviceInfo.get().consoleId` and `model`: a tester's PS5 could not resolve `sceKernelGetOpenPsId` or
+  `sceKernelGetHwModelName` from `libkernel_sys.sprx`, so the ID was `null`. The host now looks each call up
+  in `libkernel_sys.sprx`, `libkernel.sprx` and `libkernel_web.sprx`, and reads the OpenPSID from the
+  `machdep.openpsid` sysctl when no module exports the call. The kernel log names the module or sysctl that
+  answered. Not yet confirmed on hardware.
+- `Archives.inspect` no longer reads on the render thread. A tester's screen froze for up to 12 s while a
+  download kept the drive busy and the call read a RAR's headers. The native call now hands the read to a
+  worker and waits at most 25 ms; a slower read returns the previous answer for the same sources with
+  `pending: true`, and the next call returns the finished one. The return shape is otherwise unchanged.
+- Downloads with `adaptive`: an HTTP 503 or 429 caps its origin at the connections still streaming, and
+  those keep going. Previously it halved the window, paused the whole origin for the Retry-After and grew
+  back. A FileKeeper tunnel (`tunnel1.dlproxy.uk`) took 64 connections, then answered new ranges 503 with
+  Retry-After: 60. Each further 503 extended the pause, so the download sat at 0 KB/s for minutes, recovered,
+  and stalled again. The failed ranges still wait out Retry-After, without spending attempts while others stream.
+  The cap rises by one a minute after a quiet minute.
+- The download stats line no longer prints a wrapped `recv=9007199254583538KB/s` when failed ranges give back
+  bytes.
+
+## Unreleased — GPU shader layers
+
+- `ShaderView` in `@ps5-react/core`: a GLSL 4.10 core fragment shader drawn on the GPU in a View's laid-out
+  rect, composited in z-order with the CPU-rasterized UI (children and later UI show above it). The engine
+  sets `uTime`, `uResolution`, `uRect` and `uOpacity` every frame, so animation needs no JavaScript and no CPU
+  repaint; `uniforms` (numbers, vectors, color strings), `opacity` and `resolutionScale` update without
+  recompiling. A compile error logs the GLSL info log, reaches `onError`, and draws nothing. See
+  [docs/SHADERS.md](docs/SHADERS.md).
+- Native API ABI v10: `__ps5ReactNative.shader.create/update/destroy/error`, implemented once in
+  `native/shared/shader_layers.cpp` for both hosts; the presenter draws live layers, then the framebuffer
+  over them with premultiplied blending. Frames without a layer take the previous path.
+- Engine patch `embeddedReact-view-cutout.patch`: a View with `cutout` clears its rect to transparent through
+  a new optional backend callback, and the software backend's source-over composites alpha as well as color
+  (bit-identical over opaque pixels).
+- `BootIntro`: the PS5 boot sequence as an entrance. The logo is shown on black, followed by navy bokeh, a
+  burst of warm dust and a beam of light with drifting particles, then `children` cross over the scene. It
+  uses the timeline, colors and particle sizes and speeds measured from 1080p60 captures, at the console's
+  pace (`speed` scales it).
+- `apps/shader-lab` (PPSA99063) plays the intro and a particle `ShaderView` inside a panel.
+- The preview's `ps5_drive.py shot` reads the frame back from the GPU while shader layers draw; the desktop
+  self-test checks a layer's pixels through a cutout, a premultiplied blend over it, a uniform update and a
+  GLSL error. Not yet confirmed on hardware.
+
+## Unreleased — console ID
+
+- `DeviceInfo.get().consoleId` (native API ABI v9): the console's OpenPSID from `sceKernelGetOpenPsId`,
+  as 32 lowercase hex digits. The PS5 host resolves the call from `libkernel_sys.sprx` like
+  `sceKernelGetHwModelName` and reads it once; a missing symbol, a failed call or an all-zero ID gives
+  `null`. The kernel log shows `[PS5-REACT] consoleId <first 4 digits>... (OpenPSID)` when it is read.
+  The desktop preview returns `PS5_REACT_CONSOLE_ID` (32 hex digits), else a fixed preview ID. Not yet
+  confirmed on hardware.
+
+## Unreleased — subpixel letter spacing
+
+- `letterSpacing` takes fractions of a pixel: the bridge keeps it in 1/64 px and text advances, pens and
+  widths run in 26.6 fixed point on the bitmap path as on the shaped one, each glyph drawn at its pen
+  rounded to the nearest pixel (`embeddedReact-subpixel-letter-spacing.patch`). It was rounded to whole
+  pixels, so `tracking-[0.25px]` drew nothing and 0.6 px drew a full pixel a glyph. Text with no letter
+  spacing draws and measures as before.
+- Tailwind: `theme.fontTracking` gives a face its spacing at each render size (`{'SST-Medium': {23: 0.34}}`),
+  applied where a class list sets that face or size and no `tracking-*` of its own.
+
+## Unreleased — extraction and cover-loading fixes
+
+- Remote images: a load picked as cached whose bytes turned out evicted, stale or corrupt crashed the
+  loader when every connection was busy (a null transfer). It now waits for the next round, and a warm
+  URL with no free connection goes back to the front of its queue.
+- Extracted folders are 0755, a game's programs (`eboot.bin`, `.elf`, `.self`, `.prx`, `.sprx`, or a file
+  the archive marks executable) 0755 and other files 0644, through libarchive and rar-extract alike and
+  whatever the umask. Files were 0666 before, so a game folder's `eboot.bin` had no execute bit and the
+  console refused to launch it (CE-107750-0). Not yet confirmed on hardware.
+- An extraction's receipt (a checksum line per file) is written to its file through a 64 KiB buffer as
+  files complete, and read back a line at a time to sync the files and to recover a finished
+  extraction, instead of held whole in memory. Games packed as folders of many files failed with
+  "Extraction receipt exceeds the metadata limit." The receipt format is unchanged: extractions made
+  before still recover. The 100,000-entry limit stays, since the 7z preflight holds memory per entry.
+- An installable package is a file named `.pkg` or `.fpkg` (now in any case) that starts with the PKG
+  signature `\x7FCNT`, read once every file is written and again on recovery. A file so named that is
+  something else is no longer offered for install.
+
+## Unreleased — resumable download progress, far focus scrolls
+
+- Download snapshots carry `completedBytes`: the bytes of whole completed ranges, the ones a checkpoint
+  keeps. It never goes down within a task, and a resumed task's first `downloading` snapshot already
+  holds what the paused one had, so a progress bar that follows it no longer steps back after a pause.
+  `written` still counts the live ranges and drops by their bytes when they are cut or retried. A resumed
+  task also no longer reports 0 written for its first 250 ms of `downloading`.
+- A focus scroll farther than two viewports (Circle back to the top of a long catalog) jumps to one
+  viewport short of its target and moves only that last viewport; it used to pass every row on the way
+  at a catch-up speed that mounted and drew screens of content per frame, and stalled.
+- A `VirtualList` re-centring its rows moves only the scroll offsets on the list: a scroll toward a
+  header above the list (the top of the page) used to be carried back into the list and stop there.
+
+## Unreleased — full-screen fades through the fade cache
+
+- The PS5 and desktop builds turn on the engine's fade cache (one 1920x1080 slot, 8.3 MB of .bss):
+  while a fading group's content stays still, each frame blends one copy of it captured on the first
+  frame instead of re-rendering the subtree. An app can fade its whole screen (Overdrive darkens it
+  between pages) at the cost of a blend per frame.
+- `embeddedReact-fade-cache-scope.patch`: only a change inside the cached group drops its copy; a
+  focus ring's moving light or a progress bar elsewhere made every frame a miss before. A nested
+  opacity value inside a cached group now shows (it showed frozen). A smaller translucent group no
+  longer evicts a larger one mid-fade; it takes the strip path, as without the cache.
+- A group must clip its children (`overflow-hidden`) and fit 1920x1080 to use the cache: a child
+  painting past the group's box sends it down the strip path.
+
+## Unreleased — baked font coverage gamma
+
+- A baked font takes `gamma` in assets.config.js (default 1, unchanged): each pixel's coverage becomes
+  255 * (cov / 255)^(1 / gamma) before packing, at no runtime cost. The engine blends glyph edges in
+  sRGB, the PS5's own UI in linear light, so text read about half a weight lighter at the same font,
+  weight and size. With 1.8, SST section titles measure 3.15 px stems (2.8 before, the console 3.17)
+  and 20 px titles 3.74 (3.55, the console 3.92); 12 px counts stay open. Through
+  `embeddedReact-font-gamma.patch`.
+
+## Unreleased — per-edge reveal insets, row snapping, eased focus scrolling
+
+- `ScrollView` takes `revealInsets={{top, bottom, left, right}}`: the room, in logical px, kept between
+  the focused element and each edge of the viewport when focus scrolls it into view (32 for an edge
+  left out, as before). A list can run under an overlay at its edge (an app's button legend) and still
+  stop its focused row above it. A `scrollAnchor` aligns past the top inset, and with an explicit
+  bottom inset aligns only if the focused element then clears it.
+- `ScrollView` takes `revealSnap`: focus scrolling lands with one of its `scrollAnchor` rows' start the
+  top inset below the viewport top, the row nearest the least movement that still shows the focused
+  row whole, so a list cuts no row at its top and leaves no gap there. In such a list the focused element's anchor is its row, revealed
+  whole rather than aligned: a card around a focused button shows entire.
+- `ScrollView` takes `scrollMotion="ease-out"`: focus scrolling eases out over 240 ms, a quartic (45%
+  after 33 ms, 73% after 67 ms, on the target in whole pixels after 200 ms) and rests on the target
+  without overshoot, as the PS5 Store's rails do (measured frame by frame at 60 fps, they fit a quartic
+  over 235-238 ms and move for 180-200 ms). The default steady speed (speeding up over four frames, up to
+  40 logical px per frame) took about 270 ms for a 420 px row, under half of it done after 100 ms. A new
+  target starts a new 240 ms from where the view is; a nested `ScrollView` without the prop inherits
+  its enclosing one's.
+- The desktop preview passes the frame callback the time since the previous frame's callback. It was
+  the time since the previous frame ended, a few ms that left out the wait for vsync.
+- `useIsScrolling()` is true while the ScrollView around the caller, or one around it, is focus
+  scrolling, and re-renders only when that changes: an app hides its focus ring while a rail moves,
+  as the PS5 Store does.
+- An element focused before its first layout (a grid's first tile, focused as the grid mounts) is
+  revealed on that layout if it still has focus. The page stayed where it was, with focus off screen.
+- Without these props, focus scrolling is unchanged.
+
+## Unreleased — render thread freed during downloads, RAR sets checked before decoding
+
+- `Archives.inspect` reads a RAR's first file header, then walks the next ones for about 100 ms
+  (plus the header under way), instead of up to 4096 of them. Each header sits after the previous
+  file's data, so on a large volume each is a disk read of its own: on a tester's console, inspecting
+  a game archive while it downloaded at ~105 MB/s held the render thread for over 40 s. A header the
+  walk misses is still refused before anything is extracted: by the preflight, or in a set extracted
+  while it downloads (also checked with `inspect`), by the RAR worker.
+- `FileSystem.removeAsync(path)` removes a file, or a directory and everything in it, on a worker
+  thread and returns a promise: a path already gone resolves, a failure rejects with the path and the
+  system error. On a tester's console, `fs.remove` of a large download held the screen for 5 s.
+- rar-extract reads the end block of a set's last volume and the header of its first before decoding,
+  headers decrypted with the set's password. A whole last volume that says more follow (or, in RAR5, has
+  no end) fails at once with `Incomplete RAR archive or missing volume.`, a first one that is not the first with
+  `Missing first RAR volume.`, both without the volume suffix. A set lacking its last volume decoded
+  every other one first: hours on the console. While a set downloads, its first volume is checked at
+  once and its last as soon as it arrives. Headers that cannot be read (no password, a wrong one)
+  leave the reason to the extraction, as before. A last volume cut short (a download stopped early) fails
+  as before, now always named: `... Volume 4 of 4 looks incomplete.`
+
+## Unreleased — extracted file permissions
+
+- Archives extracted in the app (ZIP, 7z, TAR, and RAR when rar-extract cannot start) write folders
+  0777 and files 0666, and every extraction root is 0777, whatever the app's umask. They were 0700
+  and 0600: a game extracted that way and installed by ShadowMount froze the console at launch until
+  its tree was set to 0777 by hand. rar-extract already wrote its files open.
+
+## Unreleased — verified sandbox roots
+
+- After filesystem elevation, find /app0, /download0 and /temp0 from a descriptor opened on each
+  before the root change (the helper replaces only the root and jail), checked by device and inode,
+  else by that identity among the title's /mnt/sandbox/<TITLE>_NNN folders, instead of assuming
+  _000. A console with a ShadowMount image install found no app files at _000: no locale files,
+  runtime fonts or payloads. Without an identity the app root is the newest candidate holding
+  eboot.bin, ShadowMount's /system_ex/app/<TITLE> included; each rejected candidate is logged.
+- app.log keeps the lines logged before it opens, so it shows how filesystem access chose its roots.
+
+## Unreleased — download tail splitting
+
+- Once every range of a download has a connection, idle connections split the range with the most
+  bytes left and fetch its second half, down to 1 MiB parts. Files with fewer ranges than allowed
+  connections (under 1 GiB at 16 MiB ranges) now use every connection, and a slow connection or the
+  last ranges no longer hold the end of a download: a 432 MiB file from a 1.4 MB/s-per-connection
+  origin went from 14.3 s to 8.4 s on a localhost benchmark. The stats line counts `splits`.
+- An origin's connection window grows while nine-tenths of it is busy, not only when it is full: a
+  console download held 25 of 27 connections for most of a 1.27 GB file and never grew.
+
+## Unreleased — RAR extraction threads
+
+- rar-extract decodes with 6 threads when no download runs and 4 while one does (or while the set
+  itself still downloads), instead of 4 always; it never takes more than the cores but one. Its
+  `throughput` trace line adds the threads, cores, process CPU time, write and fsync time and the
+  decoder's waits, which the worker now reports on a `t` line.
+
 ## Unreleased — downloads across rest mode
 
 - A download whose connections die while the title is suspended (rest mode, or another app in

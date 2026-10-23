@@ -10,11 +10,13 @@ export {AppRegistry, Animated, useAnimatedValue, Easing, LayoutAnimation, Svg, P
   from 'embedded-react';
 export const Text = inspectableText(EngineText);
 setFrameBatcher(unstable_batchedUpdates);
-export {View, Image, ReleaseImages, Pressable, ScrollView, VirtualList, FocusScope, useFocusable, useFocus,
-  useIsFocused, useNavigationEvents} from './focus/index.js';
+export {View, Image, ReleaseImages, Pressable, ScrollView, VirtualList, FocusScope, useFocusable, useFocus, useIsFocused,
+  useIsScrolling, useNavigationEvents} from './focus/index.js';
 export {motion, AnimatePresence, transitions} from './motion/index.js';
 export {Screens, Screen, useIsScreenActive} from './screens.js';
 export {DownloadFormats} from './download-formats.js';
+export {ShaderView} from './shader.js';
+export {BootIntro, BOOT_INTRO_STAGES} from './boot-intro.js';
 export {Platform, DeviceInfo, FileSystem, Notifications, Users, Controller, useGamepad, Linking, Power, Fonts, BackHandler,
   Http, Downloads, Archives, Packages, BrowserCapture, Sound} from './native.js';
 
