@@ -60,6 +60,10 @@
 //   browser.capture(prefix, suffix, timeoutSeconds) ABI v7; Vikingfile capture task bound to a filename, or to any file when suffix is "/"
 //   browser.cancel(id)            stops the read-only payload by closing its connection
 //   browser.poll()                state/error/url; consumes terminal results
+//   browser.probe(url)            dev-only; stage 1 in-app browser probe (PS5 WebKit in-process),
+//                                 logs each step to the klog; inert unless built with
+//                                 PS5_REACT_BROWSER_PROBE; desktop reports it unavailable
+//   browser.probePoll()           [{id, state, error, log[]}]; consumes terminal results
 //   packages.install(path, name)   task ID; installs a .pkg under /data, /mnt/usb or /mnt/ext through the
 //                                  console's install service (PS5 only, needs the payload loader on 9021)
 //   packages.cancel(id)            stops reporting; an install the console accepted carries on

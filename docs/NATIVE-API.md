@@ -567,3 +567,23 @@ Native shape: `browser.capture(prefix, suffix, timeoutSeconds)` returns a task
 ID; `browser.cancel(id)` requests cancellation; `browser.poll()` consumes
 terminal results. Calls submit/poll synchronously on the render thread; all
 payload transport runs on the worker.
+
+### In-app browser probe (developer-only, stage 1)
+
+`BrowserProbe.start(url)` / `BrowserProbe.poll()` drive a developer diagnostic
+for an in-app browser that owns a WebKit page in-process, the way Pegasus DL+
+does, instead of launching the system browser. The probe loads `libSceNKWebKit`,
+resolves the `WK*` C API by NID through `sceKernelDlsym`, builds a context, page
+and view, loads the URL and paints one frame into an offscreen buffer. It never
+presents to the screen and never changes navigation; it only logs each step to
+the klog (`app.log`) under `[browser-probe]` and returns those lines in the poll
+snapshot's `log[]`. A console tester reads those lines to confirm which `WK*`
+symbols the firmware exports and how far the page build gets.
+
+It is compiled inert unless the engine is built with the `PS5_REACT_BROWSER_PROBE`
+environment variable set, and the desktop preview always reports it unavailable.
+It is intended for a hidden debug surface, not shipping UI; the system browser
+(`Linking.openURL`) remains the fallback whenever the probe cannot run. Nothing
+here has been verified on a console. Native shape: `browser.probe(url)` returns a
+task ID; `browser.probePoll()` consumes terminal `{id, state, error, log[]}`
+snapshots. One probe at a time; it runs on a worker thread.

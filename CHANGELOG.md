@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased — in-app browser (stage 1 probe)
+
+- A developer-only probe for an in-app browser that owns a WebKit page in-process, the way Pegasus DL+
+  does, instead of launching the system browser. `BrowserProbe.start(url)` / `BrowserProbe.poll()` load
+  `libSceNKWebKit`, resolve the `WK*` C API by NID through `sceKernelDlsym`, build a context, page and
+  view, load the URL and paint one frame into an offscreen buffer, logging every step to the klog under
+  `[browser-probe]`. It never presents and never changes navigation; it only reports what the console
+  exports and how far the page build gets. Compiled inert unless the engine is built with
+  `PS5_REACT_BROWSER_PROBE`; the desktop preview reports it unavailable. The system browser remains the
+  fallback. Not verified on a console. See `docs/NATIVE-API.md`.
+
 ## Unreleased — frame rate at high render sizes
 
 - A ScrollView over a layer backdrop scrolls by moving its rows (engine patch `embeddedReact-4k-fps.patch`).

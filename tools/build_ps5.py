@@ -135,7 +135,7 @@ def main():
                ROOT / "native/ps5/filesystem_access.cpp",
                ROOT / "native/ps5/elevation_transport.cpp",
                ROOT / "native/shared/host_api.cpp", ROOT / "native/shared/removals.cpp", ROOT / "native/shared/network.cpp",
-               ROOT / "native/shared/network_api.cpp", ROOT / "native/shared/archives.cpp", ROOT / "native/shared/archive_preflight.cpp", ROOT / "native/shared/rar5_password.cpp", ROOT / "native/shared/archive_writer.cpp", ROOT / "native/shared/archive_api.cpp", ROOT / "native/shared/browser_capture_api.cpp", ROOT / "native/ps5/browser_capture.cpp", ROOT / "native/shared/package_api.cpp", ROOT / "native/ps5/package_installer.cpp", ROOT / "native/ps5/payload_loader.cpp", ROOT / "native/ps5/relaunch.cpp", ROOT / "native/ps5/crash_log.cpp", ROOT / "native/ps5/utf8_locale.cpp", ROOT / "native/ps5/network_platform.cpp",
+               ROOT / "native/shared/network_api.cpp", ROOT / "native/shared/archives.cpp", ROOT / "native/shared/archive_preflight.cpp", ROOT / "native/shared/rar5_password.cpp", ROOT / "native/shared/archive_writer.cpp", ROOT / "native/shared/archive_api.cpp", ROOT / "native/shared/browser_capture_api.cpp", ROOT / "native/ps5/browser_capture.cpp", ROOT / "native/ps5/browser_probe.cpp", ROOT / "native/shared/package_api.cpp", ROOT / "native/ps5/package_installer.cpp", ROOT / "native/ps5/payload_loader.cpp", ROOT / "native/ps5/relaunch.cpp", ROOT / "native/ps5/crash_log.cpp", ROOT / "native/ps5/utf8_locale.cpp", ROOT / "native/ps5/network_platform.cpp",
                ROOT / "native/shared/image_loader.cpp", ROOT / "native/shared/image_api.cpp",
                ROOT / "native/shared/sound_api.cpp", generated / "sounds.generated.c",
                ROOT / "native/shared/gl_presenter.cpp", ROOT / "native/shared/shader_layers.cpp",
@@ -166,7 +166,10 @@ def main():
         flags = ["-std=c++20", "-fno-exceptions", "-fno-rtti"] if cpp else ["-std=c11"]
         warnings = (["-w", "-DHB_TINY", "-DHB_HAS_RASTER"] if source in harfbuzz_sources else
                     ["-w", "-DSB_CONFIG_UNITY"] if source.name == "SheenBidi.c" else ["-Wall", "-Wextra", "-Werror"])
-        run(["sh", hui / "tooling/prospero-clang18", *flags, "-O2", *warnings,
+        # The stage 1 in-app browser probe is a developer-only diagnostic; it is
+        # compiled inert unless PS5_REACT_BROWSER_PROBE is set in the environment.
+        probe = ["-DPS5_REACT_BROWSER_PROBE=1"] if os.environ.get("PS5_REACT_BROWSER_PROBE") else []
+        run(["sh", hui / "tooling/prospero-clang18", *flags, "-O2", *warnings, *probe,
              "-DPROSPERO=1", "-DGL_GLEXT_PROTOTYPES=1", *shlex.split(definitions),
              *[flag for path in includes for flag in ("-I", path)], "-c", source, "-o", obj],
             env=env, log=BUILD / (f"compile-{i}.log"))

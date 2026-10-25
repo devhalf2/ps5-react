@@ -390,6 +390,24 @@ export const BrowserCapture = Object.freeze({
   },
 });
 
+/**
+ * Developer-only probe for the in-app browser (stage 1). Loads the console's
+ * WebKit, builds a page in-process, loads a URL and paints one frame offscreen,
+ * logging every step to the klog (app.log). It is console-only and compiled inert
+ * unless the engine was built with PS5_REACT_BROWSER_PROBE; the desktop preview
+ * reports it as unavailable. Intended for a hidden debug surface, not shipping UI.
+ */
+export const BrowserProbe = Object.freeze({
+  /** @param {string} url http(s) URL or about:blank @returns {number} task id */
+  start(url) {
+    return host().browser.probe(url);
+  },
+  /** @returns {Array<{id:number,state:string,error:string,log:string[]}>} terminal snapshots, consumed once */
+  poll() {
+    return host().browser.probePoll();
+  },
+});
+
 const pendingImages = new Map();
 // Finished loads the host has handed over and no listener has received yet, by id in arrival order.
 const arrivedImages = new Map();

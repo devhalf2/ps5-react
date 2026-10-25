@@ -3,6 +3,7 @@
 // Additional attribution term: see LICENSE-ATTRIBUTION.
 #include "host_api.hpp"
 #include "browser_capture.hpp"
+#include "browser_probe.hpp"
 #include <cmath>
 #include <cstring>
 namespace {
@@ -49,11 +50,41 @@ JSValue poll(JSContext* ctx, JSValueConst, int, JSValueConst*) {
   }
   return out;
 }
+JSValue probe(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+  std::string url;
+  if (argc < 1 || !text(ctx, argv[0], url) ||
+      (url.compare(0, 7, "http://") != 0 && url.compare(0, 8, "https://") != 0 &&
+       url.compare(0, 11, "about:blank") != 0))
+    return JS_ThrowTypeError(ctx, "browser.probe: expected an http(s) URL or about:blank (dev only)");
+  std::string error;
+  const auto id = browser_probe::start(std::move(url), error);
+  return id ? JS_NewUint32(ctx, id) : JS_ThrowPlainError(ctx, "browser.probe: %s", error.c_str());
+}
+JSValue probePoll(JSContext* ctx, JSValueConst, int, JSValueConst*) {
+  JSValue out = JS_NewArray(ctx);
+  std::uint32_t index = 0;
+  for (const auto& snapshot : browser_probe::poll()) {
+    JSValue item = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, item, "id", JS_NewUint32(ctx, snapshot.id));
+    JS_SetPropertyStr(ctx, item, "state", JS_NewString(ctx, snapshot.state.c_str()));
+    JS_SetPropertyStr(ctx, item, "error", JS_NewString(ctx, snapshot.error.c_str()));
+    JSValue log = JS_NewArray(ctx);
+    std::uint32_t line = 0;
+    for (const auto& entry : snapshot.log)
+      JS_SetPropertyUint32(ctx, log, line++, JS_NewString(ctx, entry.c_str()));
+    JS_SetPropertyStr(ctx, item, "log", log);
+    JS_SetPropertyUint32(ctx, out, index++, item);
+  }
+  return out;
+}
 }
 JSValue ps5_react_browser_capture_api(JSContext* ctx) {
   JSValue api = JS_NewObject(ctx);
   JS_SetPropertyStr(ctx, api, "capture", JS_NewCFunction(ctx, capture, "capture", 3));
   JS_SetPropertyStr(ctx, api, "cancel", JS_NewCFunction(ctx, cancel, "cancel", 1));
   JS_SetPropertyStr(ctx, api, "poll", JS_NewCFunction(ctx, poll, "poll", 0));
+  // Stage 1 dev probe for the in-app browser; only wired through the app's debug surface.
+  JS_SetPropertyStr(ctx, api, "probe", JS_NewCFunction(ctx, probe, "probe", 1));
+  JS_SetPropertyStr(ctx, api, "probePoll", JS_NewCFunction(ctx, probePoll, "probePoll", 0));
   return api;
 }

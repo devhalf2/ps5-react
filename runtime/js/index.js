@@ -18,7 +18,7 @@ export {DownloadFormats} from './download-formats.js';
 export {ShaderView} from './shader.js';
 export {BootIntro, BOOT_INTRO_STAGES} from './boot-intro.js';
 export {Platform, DeviceInfo, FileSystem, Notifications, Users, Controller, useGamepad, Linking, Power, Fonts, BackHandler,
-  Http, Downloads, Archives, Packages, BrowserCapture, Sound} from './native.js';
+  Http, Downloads, Archives, Packages, BrowserCapture, BrowserProbe, Sound} from './native.js';
 
 // Input protocol v1 compatibility: each direction is followed by its legacy action.
 const legacyActions = {up: 'previous', left: 'previous', down: 'next', right: 'next'};
