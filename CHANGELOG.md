@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased — 7z extraction on a full heap
+
+- A 7z the heap has no room for goes to rar-extract, whatever its dictionary. The in-process path needs the
+  live heap plus 80 MiB (64 MiB decoder budget, 16 MiB margin) under the heap, so live at most 112 MiB of a
+  192 MiB heap; Pandora 0.4.0's catalog alone is 37.8 MiB of QuickJS heap (31.3 MiB in 0.3.6), and an ordinary
+  7z failed with "Not enough memory to extract." Without a payload loader the refusal stands.
+
 ## Unreleased — frame rate at high render sizes
 
 - A ScrollView over a layer backdrop scrolls by moving its rows (engine patch `embeddedReact-4k-fps.patch`).

@@ -443,6 +443,17 @@ def main():
                         env={**os.environ,"PS5_REACT_RAR_WORKER":str(root/"no-such-worker")}).stdout.splitlines()
   assert absent[1:]==["0","This archive needs the payload loader to extract: none answered on port 9021."],absent
   assert not (root/"wide-no-worker").exists() and not (root/"wide-no-worker.extracting").exists()
+  # A 7z the heap has no room for goes to rar-extract instead, whatever its dictionary; without a worker it
+  # fails as the ZIP does.
+  os.environ["ARCHIVE_NO_MEMORY"]="1"
+  try:
+   traced=phases("7zip-no-memory",[seven])
+   absent=subprocess.run([str(binary),str(root/"7zip-no-memory-no-worker"),str(1024*1024),str(seven)],capture_output=True,text=True,
+                         timeout=20,env={**os.environ,"PS5_REACT_RAR_WORKER":str(root/"no-such-worker")}).stdout.splitlines()
+  finally:del os.environ["ARCHIVE_NO_MEMORY"]
+  assert "7z worker started" in traced and "7z worker finishing" in traced,traced
+  assert (root/"7zip-no-memory/payload.bin").read_bytes()==DATA
+  assert absent[1:]==["0","Not enough memory to extract."],absent
   # The worker's own answer to a 7z request: it claims the decoder's memory before decoding.
   request=f"7ZX1\nmemory {256<<20}\nlimit {1<<30}\nreserved .ps5-react-\ndest {root/'raw-7z'}\nsource {wide}\nend\n"
   (root/"raw-7z").mkdir()

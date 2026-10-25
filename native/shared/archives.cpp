@@ -489,6 +489,11 @@ struct MemoryHold {
   const bool room = hold_memory(true);
   ~MemoryHold() { hold_memory(false); }
 };
+// Whether the heap has room for an in-process extraction now, once the image caches have dropped.
+bool heap_room() {
+  const MemoryHold memory;
+  return memory.room;
+}
 archive* open_archive(Job& job, std::string& error, std::unique_ptr<Rar5PasswordReader>& decrypted) {
   const auto& request = job.request;
   use_utf8_names();
@@ -596,6 +601,13 @@ bool rar_volumes(const Request& request) {
     const std::string_view bytes(head, count < 0 ? 0 : count);
     return std::any_of(rar_signatures.begin(), rar_signatures.end(), [&](std::string_view signature) { return bytes.starts_with(signature); });
   });
+}
+bool seven_zip_source(const Request& request) {
+  char head[6] = {};
+  const int fd = open(request.sources.front().c_str(), O_RDONLY | O_NOFOLLOW);
+  const auto count = fd < 0 ? -1 : read(fd, head, sizeof head);
+  if (fd >= 0) close(fd);
+  return count == sizeof head && !std::memcmp(head, "7z\xBC\xAF\x27\x1C", sizeof head);
 }
 // Decoder threads: PS5 has 8 cores; the interface keeps two either way, and downloads (a streamed set's own
 // included) two more.
@@ -878,7 +890,13 @@ void run(const std::shared_ptr<Job>& pointer) {
   } else if (seven_zip_worker) {
     if (!extract_worker(job, staging, receipt, error, seven_zip_request(request, staging, seven_zip_memory), "7z") && error.empty())
       error = "This archive needs the payload loader to extract: none answered on port 9021.";
-  } else if (!rar_volumes(request) || !extract_rar(job, staging, receipt, error)) {
+  } else if (rar_volumes(request) && extract_rar(job, staging, receipt, error)) {
+  } else if (seven_zip_source(request) && lines && !heap_room() &&
+             extract_worker(job, staging, receipt, error,
+                            seven_zip_request(request, staging, std::max<std::uint64_t>(seven_zip_memory, 1ULL << 20)), "7z")) {
+    // A 7z the heap has no room for now (a large catalog's live heap) goes to rar-extract as one too big for
+    // the heap does; libarchive tries it only when the worker cannot start.
+  } else {
     const MemoryHold memory;
     std::unique_ptr<Rar5PasswordReader> decrypted;
     auto* archive = open_archive(job, error, decrypted);
