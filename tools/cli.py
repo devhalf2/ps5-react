@@ -58,6 +58,7 @@ def desktop(app, test=False, target="ps5-react-preview"):
         run(["python3", ROOT / "tools/test_archives.py"], log=ROOT / ".build/archive-test.log")
         run(["python3", ROOT / "tools/test_removals.py"], log=ROOT / ".build/removal-test.log")
         run(["python3", ROOT / "tools/test_network.py"], log=ROOT / ".build/network-test.log")
+        run(["python3", ROOT / "tools/test_stream7z.py"], log=ROOT / ".build/stream7z-test.log")
         run(["python3", ROOT / "tools/test_images.py"], log=ROOT / ".build/image-test.log")
         run(["python3", ROOT / "tools/test_text.py"], log=ROOT / ".build/text-test.log")
         run(["python3", ROOT / "tools/test_browser_capture.py"], log=ROOT / ".build/browser-capture-test.log")

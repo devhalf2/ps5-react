@@ -191,7 +191,7 @@ def seven_zip_sdk(root,binary):
  assert out[0]=="failed" and out[2]=="Archive contains an unsafe path, link or special file.",out
  assert not (root/"x.bin").exists()
  # While it downloads: the bytes arrive in order into <file>.part, the engine's progress in <file>.avail;
- # the end of the archive (its headers) comes from the tail URL first. The download then publishes the file.
+ # the archive's headers, at its end, come from the tail URL first. The download then publishes the file.
  def download(name,archive,tail=True,step=1<<20,pause=0.002,publish_after=0):
   path=root/"downloads"/f"{name}.7z";path.parent.mkdir(exist_ok=True)
   blob=archive.read_bytes();part=Path(str(path)+".part");avail=Path(str(path)+".avail")
@@ -209,7 +209,7 @@ def seven_zip_sdk(root,binary):
   out,trace=process.communicate(timeout=120)
   return out.splitlines(),trace
  out,trace=download("stream-mx1",root/"sdk-mx1.7z")
- assert out[0]=="completed" and "7z tail fetched" in trace and "decoder=sdk" in trace,(out,trace)
+ assert out[0]=="completed" and "7z headers fetched" in trace and "decoder=sdk" in trace,(out,trace)
  same("stream-mx1")
  # Decoded before the download is published, it ends with the published file.
  out,trace=download("stream-late",root/"sdk-mx1.7z",step=8<<20,pause=0,publish_after=1.5)
@@ -217,7 +217,7 @@ def seven_zip_sdk(root,binary):
  same("stream-late")
  # Without the tail, the headers are read once the download reaches them.
  out,trace=download("stream-no-tail",root/"sdk-nonsolid.7z",tail=False)
- assert out[0]=="completed" and "7z tail fetched" not in trace,(out,trace)
+ assert out[0]=="completed" and "7z headers fetched" not in trace,(out,trace)
  same("stream-no-tail")
  # A 7z only libarchive reads is refused while it downloads, with nothing written: the app extracts it after.
  out,trace=download("stream-bcj",root/"sdk-bcj.7z")

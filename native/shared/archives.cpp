@@ -637,8 +637,6 @@ constexpr std::uint64_t seven_zip_worker_memory = 288ULL * 1024 * 1024;
 // What the worker's decoders may hold, the dictionary and the multithreaded LZMA2 decoder's blocks together:
 // with the worker's 32 MiB of buffers, the 384 MiB the probe saw handed over without a stall.
 constexpr std::uint64_t seven_zip_worker_cap = 352ULL * 1024 * 1024;
-// The end of a downloading 7z fetched ahead of it: its headers, and the packed header just before them.
-constexpr std::uint64_t seven_zip_tail_bytes = 4ULL * 1024 * 1024;
 // `tail` is a file holding the archive's bytes from `tail_offset` on, when its download has not reached them.
 std::string seven_zip_request(const Request& request, const std::string& staging, std::uint64_t memory, const std::string& tail = {},
                               std::uint64_t tail_offset = 0) {
@@ -800,33 +798,73 @@ private:
   std::chrono::steady_clock::time_point last_{};
   bool done_ = false;
 };
-// Fetches the end of a downloading 7z into `path`, from `offset`; false (and nothing to read there) when
-// the download's size is not known yet or the request fails: its headers are then read once it gets there.
+// A 7z number: its first byte's leading ones say how many bytes follow.
+bool seven_zip_number(const std::string& data, std::size_t& at, std::uint64_t& value) {
+  if (at >= data.size()) return false;
+  const unsigned first = static_cast<unsigned char>(data[at++]);
+  value = 0;
+  for (unsigned i = 0, mask = 0x80; i < 8; ++i, mask >>= 1) {
+    if (!(first & mask)) {
+      value |= std::uint64_t(first & (mask - 1)) << (8 * i);
+      return true;
+    }
+    if (at >= data.size()) return false;
+    value |= std::uint64_t(static_cast<unsigned char>(data[at++])) << (8 * i);
+  }
+  return true;
+}
+// Fetches the headers of a downloading 7z into `path`, from `offset`: its start header names where they
+// are, and an encoded header names the packed stream it decodes from, usually just before. A few ranged
+// requests of a few KiB. False (nothing to read there) when the download is past them already, its size is
+// not known yet or a request fails: the worker then reads them once the download gets there.
 bool fetch_tail(Job& job, const std::string& path, std::uint64_t& offset) {
   const auto& request = job.request;
+  const auto& source = request.sources.front();
   if (request.tail_url.empty()) return false;
   std::uint64_t prefix = 0, total = 0;
-  for (unsigned tries = 0; !total && tries < 40 && !job.cancelled; ++tries) {
-    if (!download_progress(request.sources.front(), prefix, total)) break;
-    if (!total) std::this_thread::sleep_for(std::chrono::milliseconds(250));
+  for (unsigned tries = 0; (!total || prefix < 32) && tries < 240 && !job.cancelled; ++tries) {
+    if (!download_progress(source, prefix, total)) return false;
+    if (!total || prefix < 32) std::this_thread::sleep_for(std::chrono::milliseconds(250));
   }
-  if (!total) return false;
-  const std::uint64_t length = std::min(total, seven_zip_tail_bytes);
-  offset = total - length;
-  // Already downloaded: nothing to fetch.
-  if (prefix >= total) return false;
+  unsigned char start[32] = {};
+  const int fd = open(regular_file(source) ? source.c_str() : (source + ".part").c_str(), O_RDONLY | O_NOFOLLOW);
+  const bool read_start = fd >= 0 && pread(fd, start, sizeof start, 0) == sizeof start;
+  if (fd >= 0) close(fd);
+  if (!total || !read_start || std::memcmp(start, "7z\xBC\xAF\x27\x1C", 6)) return false;
+  const auto little = [&](unsigned at) {
+    std::uint64_t value = 0;
+    for (unsigned i = 0; i < 8; ++i) value |= std::uint64_t(start[at + i]) << (8 * i);
+    return value;
+  };
+  const std::uint64_t header = 32 + little(12), size = little(20);
+  if (!size || size > max_metadata_bytes || header > total || size > total - header || prefix >= header + size) return false;
   std::string bytes, error;
-  if (!fetch_range(request.tail_url, request.tail_headers, offset, length, bytes, error)) {
-    trace("7z tail not fetched", error.c_str());
+  if (!fetch_range(request.tail_url, request.tail_headers, header, size, bytes, error)) {
+    trace("7z headers not fetched", error.c_str());
     return false;
+  }
+  offset = header;
+  // kEncodedHeader: kPackInfo, the packed stream's position and count, kSize and its size.
+  std::size_t at = 1;
+  std::uint64_t position = 0, streams = 0, packed = 0;
+  if (bytes[0] == 0x17 && bytes.size() > 1 && bytes[at++] == 0x06 && seven_zip_number(bytes, at, position) &&
+      seven_zip_number(bytes, at, streams) && streams && at < bytes.size() && bytes[at++] == 0x09 && seven_zip_number(bytes, at, packed) &&
+      32 + position < header && header - (32 + position) <= max_metadata_bytes && packed <= header - (32 + position) && prefix < header) {
+    std::string before;
+    if (!fetch_range(request.tail_url, request.tail_headers, 32 + position, header - (32 + position), before, error)) {
+      trace("7z packed header not fetched", error.c_str());
+      return false;
+    }
+    offset = 32 + position;
+    bytes = before + bytes;
   }
   unlink(path.c_str());
   if (!write_metadata(path.substr(0, path.rfind('/')), path.substr(path.rfind('/') + 1).c_str(), bytes)) {
     unlink(path.c_str());
-    trace("7z tail not saved", path.c_str());
+    trace("7z headers not saved", path.c_str());
     return false;
   }
-  trace("7z tail fetched, KiB", std::to_string(length >> 10).c_str());
+  trace("7z headers fetched, bytes", std::to_string(bytes.size()).c_str());
   return true;
 }
 std::string staging_path(const std::string& destination, unsigned attempt) {

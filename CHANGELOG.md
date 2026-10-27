@@ -12,11 +12,13 @@
   On the Mac, 391 MiB of a real 48 GB repack (LZMA2, 256 KiB dictionary, 1 MiB blocks) extracted in 1.2–1.6 s
   instead of 5.4–5.6 s, byte for byte the same.
 - A 7z extracts while it downloads. `Archives.extract({stream: true, tail: {url, headers}})` on a single
-  downloading 7z (`Archives.streamsSevenZip`): the engine fetches its last 4 MiB, where its headers are, with
-  one ranged GET into `<destination>.tail`, and the worker decodes each folder as the download's contiguous
-  prefix (`network::progress_of`, from the ranges complete in order) reaches it. The extraction ends once the
+  downloading 7z (`Archives.streamsSevenZip`): the engine reads where its headers are from its first 32
+  bytes, fetches them (and the packed header an encoded one decodes from) with ranged GETs of a few KiB into
+  `<destination>.tail`, and the worker decodes each folder as the download's contiguous prefix
+  (`network::progress_of`, from the ranges complete in order) reaches it. The extraction ends once the
   download is published under its final name, about when it does: 0.2 s after a simulated 20–80 MB/s download
-  of the same repack. A 7z only libarchive reads fails with "This 7z can't be extracted while it downloads."
+  of the same repack, and with the native downloader against a paced local server (`tools/test_stream7z.py`)
+  most of the files are written before the download ends. A 7z only libarchive reads fails with "This 7z can't be extracted while it downloads."
   with nothing written, for the app to extract it afterwards. The download itself is unchanged: its ranges
   still go in order, so a USB drive's exFAT never extends the file far ahead.
 - `network::fetch_range` makes one ranged GET outside the download queue.
