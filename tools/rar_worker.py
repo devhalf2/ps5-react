@@ -8,6 +8,7 @@ program extracts 7z archives (sevenzip.cpp): LZMA, LZMA2 and stored folders with
 SDK, LZMA2 on several threads, and any other folder with libarchive, so `libraries` include libarchive
 and what it links.
 """
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -53,18 +54,23 @@ LZMA_DEFINES = ["-DZ7_NO_METHODS_FILTERS", "-DZ7_AFFINITY_DISABLE"]
 
 
 def lzma_source():
-    """The pinned LZMA SDK's C directory, from 7-Zip's source release."""
+    """The pinned LZMA SDK's C directory, from 7-Zip's source release, with the repository's patches applied."""
     pinned = LOCK["lzmaSdk"]
     root = DEPS / f"lzma-{pinned['version']}"
-    marker = root / ".extracted"
-    if not marker.exists():
+    marker = root / ".patched"
+    patches = [ROOT / p for p in pinned["patches"]]
+    expected = "\n".join([pinned["sha256"], *(digest(p) for p in patches)]) + "\n"
+    if not marker.exists() or marker.read_text() != expected:
         archive = fetch(pinned["url"], DEPS / f"7z{pinned['version'].replace('.', '')}-src.tar.xz", pinned["sha256"])
-        root.mkdir(parents=True, exist_ok=True)
+        shutil.rmtree(root, ignore_errors=True)
+        root.mkdir(parents=True)
         with tarfile.open(archive) as package:
             for member in package.getmembers():
                 if member.isfile() and member.name.startswith("C/") and member.name.count("/") == 1:
                     package.extract(member, root, filter="data")
-        marker.write_text(pinned["sha256"] + "\n")
+        for patch in patches:
+            subprocess.run(["patch", "-p1", "--forward", "--quiet", "--binary", "-i", str(patch)], cwd=root / "C", check=True)
+        marker.write_text(expected)
     return root / "C"
 
 

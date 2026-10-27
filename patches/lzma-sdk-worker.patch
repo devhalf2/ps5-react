@@ -1,0 +1,12 @@
+--- a/Threads.c
++++ b/Threads.c
+@@ -459,6 +459,9 @@
+   RINOK(pthread_attr_init(&attr))
+ 
+   ret = pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_JOINABLE);
++  // PS5 React: an explicit stack, since the default differs between systems and is small on some consoles.
++  if (!ret)
++    ret = pthread_attr_setstacksize(&attr, 0x100000);
+ 
+   if (!ret)
+   {

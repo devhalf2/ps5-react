@@ -150,7 +150,10 @@
   "lzmaSdk": {
     "version": "26.05",
     "url": "https://github.com/ip7z/7zip/releases/download/26.05/7z2605-src.tar.xz",
-    "sha256": "0b6080b8c3e7a579161d2d495224c0e51c467576cb4c7048b0ab485ef44cc22e"
+    "sha256": "0b6080b8c3e7a579161d2d495224c0e51c467576cb4c7048b0ab485ef44cc22e",
+    "patches": [
+      "patches/lzma-sdk-worker.patch"
+    ]
   },
   "caBundle": {
     "version": "2026-10-20",
