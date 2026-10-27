@@ -4,8 +4,9 @@
 """rar-extract (native/rar_worker): RarLab's UnRAR library and a small MIT-licensed driver, built as a
 program of its own. UnRAR's license allows its use to extract RAR archives but is not GPL-compatible,
 so it is never linked into the engine; the engine starts this program and reads its reports. The same
-program extracts a 7z too large for the engine's heap with libarchive (sevenzip.cpp), so `libraries`
-include libarchive and what it links.
+program extracts 7z archives (sevenzip.cpp): LZMA, LZMA2 and stored folders with the public-domain LZMA
+SDK, LZMA2 on several threads, and any other folder with libarchive, so `libraries` include libarchive
+and what it links.
 """
 import subprocess
 import sys
@@ -44,6 +45,29 @@ def unrar_source():
     return root
 
 
+# The LZMA SDK's C files sevenzip.cpp uses: the 7z reader, LZMA and LZMA2 (multithreaded) decoders.
+LZMA_SOURCES = ("7zArcIn 7zBuf 7zCrc 7zCrcOpt 7zDec 7zStream Alloc Bcj2 CpuArch Lzma2Dec Lzma2DecMt LzmaDec "
+                "MtDec Threads").split()
+# No branch filters or PPMd: a folder that needs them goes to libarchive. Threads are not pinned to cores.
+LZMA_DEFINES = ["-DZ7_NO_METHODS_FILTERS", "-DZ7_AFFINITY_DISABLE"]
+
+
+def lzma_source():
+    """The pinned LZMA SDK's C directory, from 7-Zip's source release."""
+    pinned = LOCK["lzmaSdk"]
+    root = DEPS / f"lzma-{pinned['version']}"
+    marker = root / ".extracted"
+    if not marker.exists():
+        archive = fetch(pinned["url"], DEPS / f"7z{pinned['version'].replace('.', '')}-src.tar.xz", pinned["sha256"])
+        root.mkdir(parents=True, exist_ok=True)
+        with tarfile.open(archive) as package:
+            for member in package.getmembers():
+                if member.isfile() and member.name.startswith("C/") and member.name.count("/") == 1:
+                    package.extract(member, root, filter="data")
+        marker.write_text(pinned["sha256"] + "\n")
+    return root / "C"
+
+
 def up_to_date(target, command, inputs):
     """Whether `target` was made by `command` (recorded beside it) and is newer than every input."""
     recorded = target.with_name(target.name + ".cmd")
@@ -65,13 +89,14 @@ def build(output, compiler, flags=(), libraries=(), env=None):
     """Compiles UnRAR and the driver with `compiler` (a command list) and links `output`, skipping objects
     and the link when their command and inputs are unchanged since the last build."""
     source = unrar_source()
+    lzma = lzma_source()
     objects = output.parent / (output.name + ".obj")
     objects.mkdir(parents=True, exist_ok=True)
     common = [*compiler, "-O2", "-fexceptions", *DEFINES, *flags]
 
     def compile_one(item):
         path, extra = item
-        obj = objects / (path.stem + ".o")
+        obj = objects / (f"{path.parent.name}-{path.stem}.o")
         depfile = obj.with_suffix(".d")
         # UnRAR's headers are a system include for the driver, which builds with the engine's warnings.
         command = [*map(str, common), *extra, "-isystem", str(source), "-MMD", "-MF", str(depfile),
@@ -86,8 +111,10 @@ def build(output, compiler, flags=(), libraries=(), env=None):
         return obj
 
     library = ["-std=c++17", "-w"]
-    driver = ["-std=c++20", "-Wall", "-Wextra", "-Werror"]
+    c_library = ["-x", "c", "-std=gnu11", "-w", *LZMA_DEFINES]
+    driver = ["-std=c++20", "-Wall", "-Wextra", "-Werror", *LZMA_DEFINES, "-isystem", str(lzma)]
     items = [(source / f"{name}.cpp", library) for name in SOURCES] + [
+        (lzma / f"{name}.c", c_library) for name in LZMA_SOURCES] + [
         (ROOT / "native/rar_worker" / name, driver) for name in ("rar_worker.cpp", "sevenzip.cpp")]
     with ThreadPoolExecutor(8) as pool:
         built = list(pool.map(compile_one, items))
