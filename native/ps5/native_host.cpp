@@ -91,6 +91,13 @@ bool archives::hold_memory(bool hold) {
   return room;
 }
 bool archives::downloading() { return network::downloading(); }
+bool archives::download_progress(const std::string& path, std::uint64_t& prefix, std::uint64_t& total) {
+  return network::progress_of(path, prefix, total);
+}
+bool archives::fetch_range(const std::string& url, const std::vector<std::string>& headers, std::uint64_t offset, std::uint64_t length,
+                           std::string& out, std::string& error) {
+  return network::fetch_range(url, headers, offset, length, out, error);
+}
 // rar-extract.elf goes to the payload loader as the package installer does, and reports on the socket.
 int archives::start_rar_worker(const std::string& request, std::string& error) {
   const int socket = payload_loader::send("rar-extract.elf", request, 5'000'000, "Archives.extract", error);
@@ -102,6 +109,7 @@ long archives::read_rar_worker(int stream, char* data, std::size_t size) {
   return count < 0 ? -1 : count;
 }
 void archives::cancel_rar_worker(int stream) { payload_loader::write(stream, "cancel\n", 7); }
+void archives::tell_rar_worker(int stream, const std::string& line) { payload_loader::write(stream, line.data(), line.size()); }
 void archives::close_rar_worker(int stream) { payload_loader::close(stream); }
 
 namespace {

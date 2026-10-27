@@ -1,6 +1,6 @@
 """Real local archive extraction with the same native worker used on PS5."""
 from pathlib import Path
-import binascii,hashlib,io,json,lzma,os,random,struct,subprocess,tarfile,tempfile,time,zipfile
+import binascii,hashlib,io,json,lzma,os,random,re,shutil,struct,subprocess,tarfile,tempfile,time,zipfile
 from rar_worker import build_host
 ROOT=Path(__file__).resolve().parents[1]
 DATA=bytes(range(256))*1024
@@ -122,6 +122,104 @@ def uudecode(source,destination):
  lines=source.read_bytes().splitlines();at=next(i for i,line in enumerate(lines) if line.startswith(b"begin "))
  destination.write_bytes(b"".join(binascii.a2b_uu(line) for line in lines[at+1:] if line not in (b"end",b"`",b" ",b"")))
  return destination
+
+def seven_zip_sdk(root,binary):
+ """7-Zip's own archives through rar-extract's LZMA SDK reader: LZMA2 on several threads, LZMA, stored and
+ non-solid folders, empty files and directories, with libarchive for filtered folders; a damaged CRC, an
+ unsafe name, a truncated archive; and a 7z extracted while its download grows."""
+ seven=shutil.which("7zz")
+ if not seven:
+  print("SKIP: 7-Zip (7zz) is not installed; brew install sevenzip");return
+ tree=root/"sdk-tree";(tree/"game/sce_sys").mkdir(parents=True);(tree/"empty-dir").mkdir()
+ random.seed(5)
+ big=bytes(random.getrandbits(8) for _ in range(1<<20))*3+bytes(range(256))*8192+os.urandom(3<<20)
+ (tree/"game/data.bin").write_bytes(big);(tree/"game/eboot.bin").write_bytes(DATA)
+ (tree/"game/sce_sys/param.json").write_text('{"titleId":"PPSA00000"}');(tree/"game/empty.txt").write_bytes(b"")
+ tool=tree/"game/tool.sh";tool.write_bytes(b"#!/bin/sh\n");tool.chmod(0o755)
+ def make(name,*switches):
+  out=root/name;subprocess.run([seven,"a","-bd","-bso0",*switches,str(out),"game","empty-dir"],cwd=tree,check=True);return out
+ def same(name):
+  for p in tree.rglob("*"):
+   q=root/name/p.relative_to(tree)
+   assert q.exists(),q
+   if p.is_file():assert q.read_bytes()==p.read_bytes(),q
+ def worker(name,parts,**env):
+  done=subprocess.run([str(binary),str(root/name),str(1<<30),*map(str,parts)],capture_output=True,text=True,timeout=60,env={**os.environ,"ARCHIVE_TRACE":"1",**env})
+  return done.stdout.splitlines(),done.stderr
+ # 7-Zip's fastest level writes LZMA2 in 1 MiB blocks with -mmt: several threads decode them.
+ for name,switches in [("sdk-mx1",["-mx1","-mmt=4","-md=256k"]),("sdk-lzma",["-m0=LZMA","-mx5"]),("sdk-copy",["-mx0"]),
+                       ("sdk-nonsolid",["-mx1","-ms=off"]),("sdk-mx9",["-mx9","-mmt=2"])]:
+  out,trace=worker(name,[make(name+".7z",*switches)])
+  assert out[0]=="completed",(name,out,trace)
+  assert "decoder=sdk" in trace,(name,trace)
+  same(name)
+  assert (root/name/"game/eboot.bin").stat().st_mode&0o777==0o755 and (root/name/"game/data.bin").stat().st_mode&0o777==0o644
+  assert (root/name/"game/tool.sh").stat().st_mode&0o111,name
+ # The 1 MiB blocks decode on several threads.
+ out,trace=worker("sdk-threads",[root/"sdk-mx1.7z"])
+ assert re.search(r"threads=[2-9] .*block=1MiB",trace),trace
+ # Branch filters stay with libarchive.
+ for name,switches in [("sdk-bcj",["-m0=BCJ","-m1=LZMA2"])]:
+  out,trace=worker(name,[make(name+".7z",*switches)])
+  assert out[0]=="completed" and "decoder=libarchive" in trace,(name,out,trace)
+  same(name)
+ # A split 7z (.001, .002...) is one archive cut into pieces.
+ subprocess.run([seven,"a","-bd","-bso0","-mx1","-v700k",str(root/"sdk-split.7z"),"game","empty-dir"],cwd=tree,check=True)
+ out,trace=worker("sdk-split",sorted(root.glob("sdk-split.7z.*")))
+ assert out[0]=="completed" and "decoder=sdk" in trace,(out,trace)
+ same("sdk-split")
+ # A damaged byte in a stored file fails its CRC; nothing is published.
+ stored=bytearray((root/"sdk-copy.7z").read_bytes());at=bytes(stored).find(big[:64])+100;stored[at]^=1
+ (root/"sdk-bad.7z").write_bytes(stored)
+ out,_=worker("sdk-bad",[root/"sdk-bad.7z"])
+ assert out[0]=="failed" and out[2]=="7z checksum mismatch; the archive is damaged.",out
+ assert not (root/"sdk-bad").exists() and not (root/"sdk-bad.extracting").exists()
+ # A truncated archive fails before anything is published.
+ (root/"sdk-cut.7z").write_bytes((root/"sdk-mx1.7z").read_bytes()[:-5000])
+ out,_=worker("sdk-cut",[root/"sdk-cut.7z"])
+ assert out[0]=="failed" and not (root/"sdk-cut").exists(),out
+ # A name leaving the destination is refused, from an uncompressed header (its CRC recomputed).
+ (root/"evil/aa").mkdir(parents=True);(root/"evil/aa/x.bin").write_bytes(DATA)
+ plain=root/"sdk-evil.7z";subprocess.run([seven,"a","-bd","-bso0","-mx0","-mhc=off",str(plain),"aa"],cwd=root/"evil",check=True)
+ blob=bytearray(plain.read_bytes());name="aa/x.bin".encode("utf-16-le")
+ at=bytes(blob).find(name);assert at>0
+ blob[at:at+len(name)]="../x.bin".encode("utf-16-le")
+ offset,size=struct.unpack_from("<QQ",blob,12);start=32+offset
+ struct.pack_into("<I",blob,28,binascii.crc32(blob[start:start+size]));struct.pack_into("<I",blob,8,binascii.crc32(blob[12:32]))
+ plain.write_bytes(blob)
+ out,_=worker("sdk-evil",[plain])
+ assert out[0]=="failed" and out[2]=="Archive contains an unsafe path, link or special file.",out
+ assert not (root/"x.bin").exists()
+ # While it downloads: the bytes arrive in order into <file>.part, the engine's progress in <file>.avail;
+ # the end of the archive (its headers) comes from the tail URL first. The download then publishes the file.
+ def download(name,archive,tail=True,step=1<<20,pause=0.002):
+  path=root/"downloads"/f"{name}.7z";path.parent.mkdir(exist_ok=True)
+  blob=archive.read_bytes();part=Path(str(path)+".part");avail=Path(str(path)+".avail")
+  part.write_bytes(blob[:32]);avail.write_text(f"32 {len(blob)}")
+  args=[str(binary),str(root/name),str(1<<30),str(path),"--stream"]+(["--tail-url","file://"+str(archive)] if tail else [])
+  process=subprocess.Popen(args,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,env={**os.environ,"ARCHIVE_TRACE":"1"})
+  time.sleep(0.3)
+  with open(part,"r+b") as f:
+   for at in range(32,len(blob),step):
+    f.seek(at);f.write(blob[at:at+step]);f.flush()
+    avail.write_text(f"{min(at+step,len(blob))} {len(blob)}");time.sleep(pause)
+  # Published: the download is over.
+  os.rename(part,path);avail.unlink()
+  out,trace=process.communicate(timeout=120)
+  return out.splitlines(),trace
+ out,trace=download("stream-mx1",root/"sdk-mx1.7z")
+ assert out[0]=="completed" and "7z tail fetched" in trace and "decoder=sdk" in trace,(out,trace)
+ same("stream-mx1")
+ # Without the tail, the headers are read once the download reaches them.
+ out,trace=download("stream-no-tail",root/"sdk-nonsolid.7z",tail=False)
+ assert out[0]=="completed" and "7z tail fetched" not in trace,(out,trace)
+ same("stream-no-tail")
+ # A 7z only libarchive reads is refused while it downloads, with nothing written: the app extracts it after.
+ out,trace=download("stream-bcj",root/"sdk-bcj.7z")
+ assert out[0]=="failed" and out[2]=="This 7z can't be extracted while it downloads.",(out,trace)
+ assert not (root/"stream-bcj").exists() and not (root/"stream-bcj.extracting").exists()
+ # Decoding keeps pace with a slow download: most of the archive is extracted before its last bytes arrive.
+ print("PASS: 7-Zip archives through the LZMA SDK, on several threads, and while they download")
 
 def main():
  with tempfile.TemporaryDirectory(prefix="ps5-react-archives-") as tmp:
@@ -625,5 +723,6 @@ def main():
   soon=subprocess.check_output([str(binary),"inspect-soon","400",str(rar_parts[0])],text=True,timeout=20).splitlines()
   assert soon==["||pending","rar||done","rar||pending"],soon
   assert subprocess.check_output([str(binary),"inspect-soon","0",str(rar_parts[0])],text=True,timeout=20).splitlines()==["rar||done"]*3
+  seven_zip_sdk(root,binary)
   print("PASS: header inspection of partial downloads, off the render thread; ZIP/TAR/7z/multivolume RAR, decoder memory refusal, interrupted staging, verified recovery, missing parts and unsafe archive rejection")
 if __name__=="__main__":main()

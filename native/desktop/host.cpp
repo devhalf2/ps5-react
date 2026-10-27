@@ -899,4 +899,11 @@ void archives::trace(const char*, const char*) {}
 std::size_t archives::pipeline_bytes() { return 32 * 1024 * 1024; }
 bool archives::hold_memory(bool hold) { images::hold_memory(hold); return true; }
 bool archives::downloading() { return network::downloading(); }
+bool archives::download_progress(const std::string& path, std::uint64_t& prefix, std::uint64_t& total) {
+  return network::progress_of(path, prefix, total);
+}
+bool archives::fetch_range(const std::string& url, const std::vector<std::string>& headers, std::uint64_t offset, std::uint64_t length,
+                           std::string& out, std::string& error) {
+  return network::fetch_range(url, headers, offset, length, out, error);
+}
 bool archives::list_directory(const char* path, void (*visit)(const char*, void*), void* user) { return host::read_dir(path, visit, user); }

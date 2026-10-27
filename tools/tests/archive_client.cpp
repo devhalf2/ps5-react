@@ -3,6 +3,7 @@
 #include "archive_preflight.hpp"
 #include <chrono>
 #include <cstdlib>
+#include <fstream>
 #include <iostream>
 #include <thread>
 // ARCHIVE_TRACE=1 prints the extraction steps, the throughput breakdown among them.
@@ -13,6 +14,14 @@ std::size_t archives::pipeline_bytes(){const char* v=std::getenv("ARCHIVE_PIPELI
 bool archives::hold_memory(bool hold){return !hold||!std::getenv("ARCHIVE_NO_MEMORY");}
 // ARCHIVE_DOWNLOADING=1 asks rar-extract for the thread count used while downloads run.
 bool archives::downloading(){return std::getenv("ARCHIVE_DOWNLOADING")!=nullptr;}
+// A test stands in for a download to <path> by writing "<prefix> <total>" to <path>.avail; removing it ends the download.
+bool archives::download_progress(const std::string& path,std::uint64_t& prefix,std::uint64_t& total){
+ std::ifstream in(path+".avail");unsigned long long p=0,t=0;if(!(in>>p>>t))return false;prefix=p;total=t;return true;}
+// file://<path> URLs only: the range is read from that file.
+bool archives::fetch_range(const std::string& url,const std::vector<std::string>&,std::uint64_t offset,std::uint64_t length,std::string& out,std::string& error){
+ if(url.rfind("file://",0)!=0){error="tests fetch file:// URLs only";return false;}
+ std::ifstream in(url.substr(7),std::ios::binary);in.seekg(std::streamoff(offset));out.assign(length,'\0');
+ if(!in.read(out.data(),std::streamsize(length))){error="short range";return false;}return true;}
 // True once `s` has ended. ARCHIVE_PHASES=1 prints to stderr each phase the polls see, then the files synced
 // of the total and the declared total at the end.
 bool ended(const archives::Snapshot& s){
@@ -48,6 +57,7 @@ int main(int argc,char** argv){
  for(int i=3;i<argc;i++){
   if(std::string(argv[i])=="--password"&&i+1<argc)request.password=argv[++i];
   else if(std::string(argv[i])=="--stream")request.stream=true;
+  else if(std::string(argv[i])=="--tail-url"&&i+1<argc)request.tail_url=argv[++i];
   else if(std::string(argv[i])=="--cancel-after"&&i+1<argc)cancel_after=std::stol(argv[++i]);
   else if(std::string(argv[i])=="--again"&&i+1<argc)again=argv[++i];
   else request.sources.emplace_back(argv[i]);

@@ -32,6 +32,8 @@ struct Snapshot {
   std::uint64_t received = 0, written = 0, total = 0, buffered = 0;
   // Bytes of whole ranges, the ones a checkpoint keeps: never less after a pause, a resume or a retry.
   std::uint64_t completed_bytes = 0;
+  // The file's first bytes, all on disk: what can be read in order while the rest downloads.
+  std::uint64_t contiguous_bytes = 0;
   double bytes_per_second = 0;
   unsigned connections = 0, retries = 0;
   int status = 0;
@@ -45,6 +47,13 @@ void cancel(std::uint32_t id);
 std::vector<Snapshot> poll();
 // True while a download to a file runs; image loading yields connections and memory to it.
 bool downloading();
+// How far the download to `destination` has come: its first `prefix` bytes are on disk (in
+// `destination`.part), of `total` (0 until known). False when no unfinished download writes it. Any thread.
+bool progress_of(const std::string& destination, std::uint64_t& prefix, std::uint64_t& total);
+// One ranged GET of `length` bytes of `url` from `offset`, with `headers`, waited for and kept in `out`.
+// For an extraction that reads an archive's directory, kept at its end, before its download reaches it.
+bool fetch_range(const std::string& url, const std::vector<std::string>& headers, std::uint64_t offset,
+                 std::uint64_t length, std::string& out, std::string& error);
 const char* version();
 // Applies the transport policy every request shares (protocols, redirects, TLS trust, timeouts,
 // identity encoding and the PS5 socket options) to a libcurl easy handle.

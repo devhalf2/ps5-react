@@ -729,6 +729,7 @@ public:
   std::uint32_t enqueue(Request request, std::string& error);
   void cancel(std::uint32_t id);
   std::vector<Snapshot> poll();
+  bool progress_of(const std::string& destination, std::uint64_t& prefix, std::uint64_t& total);
   bool running() const { return running_; }
   const std::string& error() const { return error_; }
 private:
@@ -914,6 +915,18 @@ void Service::cancel(std::uint32_t id) {
   std::lock_guard lock(mutex_);
   for (const auto& job : jobs_) if (job->snapshot.id == id) job->cancelled = true;
   if (multi_) curl_multi_wakeup(multi_);
+}
+
+bool Service::progress_of(const std::string& destination, std::uint64_t& prefix, std::uint64_t& total) {
+  std::lock_guard lock(mutex_);
+  for (const auto& job : jobs_) {
+    if (job->finalized || job->request.destination != destination) continue;
+    std::lock_guard job_lock(job->mutex);
+    prefix = job->snapshot.contiguous_bytes;
+    total = job->snapshot.total_known ? job->snapshot.total : 0;
+    return true;
+  }
+  return false;
 }
 
 std::vector<Snapshot> Service::poll() {
@@ -1480,6 +1493,10 @@ void Service::snapshot(Job& job, unsigned allowed, Clock::time_point now,
   }
   std::uint64_t buffered;
   { std::lock_guard lock(disk_mutex_); buffered = (block_count-free_.size())*block_size; }
+  // Ranges complete out of order; the leading run of them is the part an extraction can already read.
+  std::uint64_t contiguous = 0;
+  if (job.ranged) for (std::size_t i = 0; i < job.completed.size() && job.completed[i]; ++i) contiguous += range_length(job, i);
+  else contiguous = written;
   const double elapsed = std::chrono::duration<double>(now-previous).count();
   const double speed = elapsed > 0 && written >= previous_written ? (written-previous_written)/elapsed : 0;
   {
@@ -1487,6 +1504,7 @@ void Service::snapshot(Job& job, unsigned allowed, Clock::time_point now,
     job.snapshot.received = received; job.snapshot.written = written;
     // Without ranges nothing resumes, and a retry starts over: the live count is all there is.
     job.snapshot.completed_bytes = job.ranged ? job.durable : written;
+    job.snapshot.contiguous_bytes = contiguous;
     job.snapshot.total = job.total; job.snapshot.total_known = job.known;
     job.snapshot.bytes_per_second = speed; job.snapshot.buffered = buffered;
     job.snapshot.connections = std::min(active, allowed); job.snapshot.retries = job.retries;
@@ -1818,6 +1836,40 @@ std::vector<Snapshot> poll() {
   return out;
 }
 bool downloading() { return downloading_file; }
+bool progress_of(const std::string& destination, std::uint64_t& prefix, std::uint64_t& total) {
+  return service.progress_of(destination, prefix, total);
+}
+bool fetch_range(const std::string& url, const std::vector<std::string>& headers, std::uint64_t offset,
+                 std::uint64_t length, std::string& out, std::string& error) {
+  out.clear(); error.clear();
+  if (!length) { error = "empty range"; return false; }
+  CURL* curl = curl_easy_init();
+  if (!curl) { error = "cannot start a request"; return false; }
+  curl_slist* list = nullptr;
+  for (const auto& header : headers) list = curl_slist_append(list, header.c_str());
+  struct Sink { std::string* out; std::uint64_t length; } sink{&out, length};
+  const std::string range = std::to_string(offset)+"-"+std::to_string(offset+length-1);
+  bool ok = configure_transport(curl, url, headers.empty());
+  ok = ok && curl_easy_setopt(curl, CURLOPT_RANGE, range.c_str()) == CURLE_OK;
+  ok = ok && curl_easy_setopt(curl, CURLOPT_HTTPHEADER, list) == CURLE_OK;
+  ok = ok && curl_easy_setopt(curl, CURLOPT_TIMEOUT, 60L) == CURLE_OK;
+  ok = ok && curl_easy_setopt(curl, CURLOPT_WRITEDATA, &sink) == CURLE_OK;
+  ok = ok && curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, +[](char* data, size_t size, size_t count, void* user) -> size_t {
+    auto* sink = static_cast<Sink*>(user);
+    // A server that ignores the range sends the whole file: stop at once rather than take it all.
+    if (sink->out->size()+size*count > sink->length) return 0;
+    sink->out->append(data, size*count);
+    return size*count;
+  }) == CURLE_OK;
+  long status = 0;
+  const CURLcode result = ok ? curl_easy_perform(curl) : CURLE_FAILED_INIT;
+  curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
+  curl_easy_cleanup(curl);
+  curl_slist_free_all(list);
+  if (result != CURLE_OK) error = curl_easy_strerror(result);
+  else if (status != 206 || out.size() != length) error = "range answered HTTP "+std::to_string(status)+" with "+std::to_string(out.size())+" bytes";
+  return error.empty();
+}
 const char* version() { return curl_version(); }
 } // namespace network
 #else
@@ -1830,6 +1882,10 @@ std::uint32_t enqueue(Request, std::string& error) {
 void cancel(std::uint32_t) {}
 std::vector<Snapshot> poll() { return {}; }
 bool downloading() { return false; }
+bool progress_of(const std::string&, std::uint64_t&, std::uint64_t&) { return false; }
+bool fetch_range(const std::string&, const std::vector<std::string>&, std::uint64_t, std::uint64_t, std::string&, std::string& error) {
+  error = "networking is disabled"; return false;
+}
 const char* version() { return "disabled"; }
 bool configure_transport(void*, const std::string&, bool) { return false; }
 } // namespace network

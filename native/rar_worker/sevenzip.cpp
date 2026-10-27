@@ -8,17 +8,17 @@
 // libarchive, as before.
 //
 // Request, after the "7ZX1" line: "memory <bytes>" (what the engine's preflight says the decoder needs, 1
-// when it could not read the headers), "cap <bytes>" (the most this process may hold for decoding),
+// when it could not read the headers), "cap <bytes>" (the most the decoders may hold, `memory` when absent),
 // "threads <n>", "limit <bytes>", "flatten <extension>"..., "reserved <text>", "dest <directory>",
-// "source <path>"... in volume order, "wait 1" when the one source is still downloading, then "end".
-// The engine can then write "cancel" at any time, and for a downloading source "have <prefix> <tail>
-// <total>" (its first `prefix` bytes and every byte from `tail` to `total` are on disk) and "done <total>"
-// once the download is complete. Answers as for a RAR set: "ready", "d <bytes>" once the headers are read,
+// "source <path>"... in volume order, "wait 1" when the one source is still downloading, "tail <offset>
+// <path>" when a file holds its bytes from `offset` on, then "end". The engine can then write "cancel" at
+// any time, and for a downloading source "have <prefix> <total>" (its first `prefix` bytes of `total` are
+// on disk, in `<source>.part`) and "done <total>" once the download is complete. Answers as for a RAR set: "ready", "d <bytes>" once the headers are read,
 // "p <bytes written>", "k" every second, "f <sha256> <size> <path>" once a file is on disk and synced, "s"
 // once every file is decoded, "t <key>=<value>...", then "ok", "cancelled" or "fail <reason>".
 //
-// A downloading 7z is extracted as it arrives: its headers sit at its end, which the engine downloads
-// first, and its folders are decoded as their bytes come in. One that needs libarchive fails with
+// A downloading 7z is extracted as it arrives: its headers sit at its end, which the engine fetches ahead
+// of the download into the tail file, and its folders are decoded as their bytes come in. One that needs libarchive fails with
 // `stream_refused` before anything is written, and the app extracts it once the download is complete.
 //
 // A program's malloc on the console has no ceiling of its own: the system hands over memory it takes
@@ -64,18 +64,18 @@ constexpr std::uint32_t unix_extension = 0x8000, no_folder = std::uint32_t(-1);
 constexpr std::uint64_t max_files = 100000;
 
 struct Options {
-  std::uint64_t memory = 0, cap = 0, limit = 0;
+  std::uint64_t memory = 0, cap = 0, limit = 0, tail_offset = 0;
   unsigned threads = 1;
   bool wait = false;
   std::vector<std::string> flatten, sources;
-  std::string reserved, destination;
+  std::string reserved, destination, tail;
 };
 
 // Set by the control thread (a cancel, or the engine gone).
 std::atomic<bool> cancelled{false};
 bool stopping() { return cancelled || output_lost; }
 // A downloading source, as the engine last reported it.
-std::atomic<std::uint64_t> grown_prefix{0}, grown_tail{~0ULL}, grown_total{0};
+std::atomic<std::uint64_t> grown_prefix{0}, grown_total{0};
 std::atomic<bool> grown_whole{false};
 
 bool read_options(Options& options) {
@@ -93,6 +93,10 @@ bool read_options(Options& options) {
     else if (key == "threads") options.threads = std::max(1u, unsigned(strtoul(value.c_str(), nullptr, 10)));
     else if (key == "limit") options.limit = strtoull(value.c_str(), nullptr, 10);
     else if (key == "wait") options.wait = value == "1";
+    else if (key == "tail" && value.find(' ') != std::string::npos) {
+      options.tail_offset = strtoull(value.c_str(), nullptr, 10);
+      options.tail = value.substr(value.find(' ') + 1);
+    }
     else if (key == "flatten") options.flatten.push_back(value);
     else if (key == "reserved") options.reserved = value;
     else if (key == "dest") options.destination = value;
@@ -107,10 +111,9 @@ void control() {
   std::string line;
   while (read_line(line)) {
     if (line == "cancel") break;
-    unsigned long long a = 0, b = 0, c = 0;
-    if (std::sscanf(line.c_str(), "have %llu %llu %llu", &a, &b, &c) == 3) {
-      grown_total = c;
-      grown_tail = b;
+    unsigned long long a = 0, b = 0;
+    if (std::sscanf(line.c_str(), "have %llu %llu", &a, &b) == 2) {
+      grown_total = b;
       grown_prefix = a;
     } else if (std::sscanf(line.c_str(), "done %llu", &a) == 1) {
       grown_total = a;
@@ -149,9 +152,20 @@ public:
   ~Input() {
     for (auto& volume : volumes_)
       if (volume.fd >= 0) close(volume.fd);
+    if (tail_fd_ >= 0) close(tail_fd_);
   }
   bool open(const Options& options, std::string& error) {
     growing_ = options.wait;
+    if (growing_ && !options.tail.empty()) {
+      struct stat st;
+      tail_fd_ = ::open(options.tail.c_str(), O_RDONLY | O_NOFOLLOW);
+      if (tail_fd_ >= 0 && (fstat(tail_fd_, &st) || !S_ISREG(st.st_mode))) {
+        close(tail_fd_);
+        tail_fd_ = -1;
+      }
+      tail_offset_ = options.tail_offset;
+      tail_size_ = tail_fd_ >= 0 ? std::uint64_t(st.st_size) : 0;
+    }
     std::uint64_t start = 0;
     for (const auto& path : options.sources) {
       Volume volume{-1, start, 0, path};
@@ -181,7 +195,8 @@ public:
   // Up to `size` bytes at `at` into `data`, `got` of them (0 at the end); false on a read error or a stop.
   bool read(std::uint64_t at, void* data, size_t size, size_t& got) {
     got = 0;
-    if (growing_ ? !available(at, size) : false) return false;
+    if (growing_ && from_tail(at, data, size, got)) return true;
+    if (growing_ && !available(at, size)) return false;
     if (!growing_) size = at >= size_ ? 0 : size_t(std::min<std::uint64_t>(size, size_ - at));
     auto* out = static_cast<unsigned char*>(data);
     while (got < size) {
@@ -215,11 +230,28 @@ private:
     waited_ns += now_ns() - started;
     return !stopping();
   }
+  // Bytes the tail file holds, while the download has not reached them; a read is cut where it starts.
+  bool from_tail(std::uint64_t at, void* data, size_t& size, size_t& got) {
+    if (tail_fd_ < 0 || grown_whole || at < grown_prefix) {
+      if (tail_fd_ >= 0 && at < tail_offset_ && at + size > tail_offset_ && at + size > grown_prefix && !grown_whole)
+        size = size_t(std::max<std::uint64_t>(tail_offset_, grown_prefix) - at);
+      return false;
+    }
+    if (at < tail_offset_ || at - tail_offset_ >= tail_size_) return false;
+    const size_t want = size_t(std::min<std::uint64_t>(size, tail_size_ - (at - tail_offset_)));
+    while (got < want) {
+      const ssize_t count = pread(tail_fd_, static_cast<unsigned char*>(data) + got, want - got, off_t(at - tail_offset_ + got));
+      if (count < 0 && errno == EINTR) continue;
+      if (count <= 0) return false;
+      got += size_t(count);
+    }
+    return true;
+  }
   // Waits until bytes from `at` are on disk, and trims `size` to what is.
   bool available(std::uint64_t at, size_t& size) {
     while (true) {
       const bool whole = grown_whole;
-      const std::uint64_t total = grown_total, prefix = grown_prefix, tail = grown_tail;
+      const std::uint64_t total = grown_total, prefix = grown_prefix;
       if (total) {
         if (at >= total) {
           size = 0;
@@ -227,7 +259,7 @@ private:
         }
         size = size_t(std::min<std::uint64_t>(size, total - at));
       }
-      if (whole || (total && at >= tail)) return true;
+      if (whole) return true;
       if (at < prefix) {
         size = size_t(std::min<std::uint64_t>(size, prefix - at));
         return true;
@@ -247,7 +279,8 @@ private:
     return false;
   }
   std::vector<Volume> volumes_;
-  std::uint64_t size_ = 0;
+  std::uint64_t size_ = 0, tail_offset_ = 0, tail_size_ = 0;
+  int tail_fd_ = -1;
   bool growing_ = false;
 };
 
@@ -710,7 +743,7 @@ std::string extract_sdk(const Options& options, Input& input, Writer& writer, Pr
   }
   say("d " + std::to_string(total));
   // Each folder's plan; the memory the largest needs is claimed before anything is written.
-  const std::uint64_t room = options.cap > overhead ? options.cap - overhead : 0;
+  const std::uint64_t room = options.cap;
   std::vector<Plan> plans(folders.size());
   std::uint64_t memory = 1 << 20;
   for (size_t i = 0; i < folders.size(); ++i) {
