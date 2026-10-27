@@ -210,6 +210,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return
             start, end = map(int, match.groups())
             status = 206
+        # Like Real-Debrid's CDN: a one-byte probe gets a body far longer than its Content-Range says.
+        overlong = path == "/overlong-probe" and selected == "bytes=0-0"
+        if overlong: end = min(total-1, 65535)
         if (path == "/flaky" and selected != "bytes=0-0") or path == "/flaky-probe":
             with self.guard:
                 retry_key = (path, selected)
@@ -253,7 +256,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_header("ETag", '"fixture-v2"' if path == "/changed" or changed_etag else '"fixture-v1"')
         if status == 206:
             reported = start+1 if path == "/bad-range" and selected != "bytes=0-0" else start
-            self.send_header("Content-Range", f"bytes {reported}-{end}/{total}")
+            self.send_header("Content-Range", f"bytes {reported}-{0 if overlong else end}/{total}")
         self.end_headers()
         if head:
             return
@@ -340,8 +343,10 @@ def main():
         directory = Path(temporary)
         binary = compile_client(directory)
 
-        def run(endpoint, path="-", connections=4, max_bytes=1024*1024, cancel=0, digest="", method="GET", file_limit=0, stop=0, pieces=False, hashes=None, recover=False, reject_html=False, no_redirect=False, mirrors=(), adaptive=False, range_probe=False, range_bytes=0, beside="", timeout=20):
+        def run(endpoint, path="-", connections=4, max_bytes=1024*1024, cancel=0, digest="", method="GET", file_limit=0, stop=0, pieces=False, hashes=None, recover=False, reject_html=False, no_redirect=False, mirrors=(), adaptive=False, range_probe=False, range_bytes=0, beside="", timeout=20, storage_root=""):
             environment = dict(os.environ)
+            environment.pop("NETWORK_TEST_STORAGE_ROOT", None)
+            if storage_root: environment["NETWORK_TEST_STORAGE_ROOT"] = str(storage_root)
             environment.pop("NETWORK_TEST_BESIDE", None)
             if beside: environment["NETWORK_TEST_BESIDE"] = origin+beside
             environment.pop("NETWORK_TEST_RANGE_PROBE", None)
@@ -596,6 +601,14 @@ def main():
         probe_retry = run("/flaky-probe", path)
         assert probe_retry["state"] == "completed" and probe_retry["retries"] == 17, probe_retry
         path.unlink()
+        # A one-byte probe answered with more than its byte is asked again for 16 bytes, then downloads.
+        path = directory / "overlong-probe"
+        before = len(Handler.requests)
+        overlong = run("/overlong-probe", path)
+        assert overlong["state"] == "completed", overlong
+        assert path.read_bytes() == DATA
+        assert ("/overlong-probe", "bytes=0-15", None) in Handler.requests[before:], Handler.requests[before:]
+        path.unlink()
         path = directory / "disk-error"
         failed = run("/file", path, file_limit=512*1024)
         assert failed["state"] == "failed" and "write partial file" in failed["error"], failed
@@ -671,6 +684,42 @@ def main():
         requests = Handler.requests[before:]
         assert len([item for item in requests if item[1] != "bytes=0-0"]) < 16, requests
         assert all(item[2] == '"fixture-v1"' for item in requests if item[1] != "bytes=0-0")
+        path.unlink()
+        # A drive that comes back with another device and inode for its root (a USB drive after the
+        # console restarts) resumes: the checkpoint names the bytes and the file, not the root.
+        drive = directory / "drive"
+        drive.mkdir()
+        path = drive / "usb-resume"
+        cancelled = run("/slow", path, cancel=180, storage_root=drive)
+        assert cancelled["state"] == "cancelled", cancelled
+        moved = directory / "drive-before"
+        drive.rename(moved)
+        drive.mkdir()
+        for item in moved.iterdir(): item.rename(drive / item.name)
+        moved.rmdir()
+        resumed = run("/slow", path, storage_root=drive)
+        assert resumed["state"] == "completed", resumed
+        assert resumed["firstCompleted"] == cancelled["completedBytes"] > 0, (cancelled, resumed)
+        assert path.read_bytes() == DATA
+        path.unlink()
+        # A checkpoint an earlier engine wrote, whose identity still names the root's device and inode,
+        # resumes too, and is rewritten without them.
+        cancelled = run("/slow", path, cancel=180, storage_root=drive)
+        assert cancelled["state"] == "cancelled", cancelled
+        resume = Path(str(path) + ".resume")
+        header = bytearray(resume.read_bytes())
+        offset = 28  # magic[8], total and range_bytes (u64), count (u32)
+        fields = b"".join(value.encode() + b"\0" for value in ('etag:"fixture-v1"', "", str(len(DATA))))
+        current = hashlib.sha256(fields).hexdigest()
+        assert header[offset:offset+65] == current.encode() + b"\0", (header[offset:offset+65], current)
+        root = drive.stat()
+        legacy = hashlib.sha256(fields + f"{root.st_dev}:{root.st_ino}".encode()).hexdigest()
+        header[offset:offset+64] = legacy.encode()
+        resume.write_bytes(bytes(header))
+        resumed = run("/slow", path, storage_root=drive)
+        assert resumed["state"] == "completed", resumed
+        assert resumed["firstCompleted"] == cancelled["completedBytes"] > 0, (cancelled, resumed)
+        assert path.read_bytes() == DATA
         path.unlink()
         # A signed link that expires mid-download resumes from a freshly resolved one: the checkpoint
         # names the bytes (validator, size), not the URL.
