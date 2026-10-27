@@ -9,6 +9,19 @@
   copy after checking that OpenSSL loads every certificate. Verified only by the build so far; the merge
   runs on a console.
 
+## Unreleased — downloads and extraction from the Overdrive fork
+
+- A paused download resumes after a restart from a USB drive. The checkpoint identity no longer hashes the
+  storage root's device and inode, which a USB drive gets anew at every boot, so resuming failed with "no
+  matching durable checkpoint". A checkpoint written with the old identity is still accepted and rewritten.
+- FileKeeper's gateways (fetchio.cc, dlproxy.uk) get at most 16 connections; past about twenty they answer
+  every range 503 with Retry-After 60.
+- A CDN that sends the whole file for bytes=0-0 under a one-byte Content-Range (Real-Debrid's) is probed
+  again for 16 bytes instead of failing the download.
+- Extraction staging recorded for another run of the same inputs, left by an earlier session, is cleared
+  instead of failing every retry with "Staging belongs to another extraction". Staging with no record, or a
+  later attempt's beside a silent worker, is still preserved.
+
 ## Unreleased — 7z extraction on a full heap
 
 - A 7z the heap has no room for goes to rar-extract, whatever its dictionary. The in-process path needs the
