@@ -838,8 +838,17 @@ void run(const std::shared_ptr<Job>& pointer) {
     // Staging a streamed run of the same set left is this task's own too.
     const bool own = recorded && (owner == "P5ST001:" + identity + "\n" || owner == "P5ST001:" + stream_identity(request) + "\n");
     if (!abandoned && !own) {
-      fail(job, "Staging belongs to another extraction; files preserved.");
-      return;
+      // Staging that names another run of these inputs was left by an earlier session: this process
+      // extracts one archive at a time, on the staging of its own attempt, so nothing else writes here.
+      // The parts changed since (a set renamed after its download) or the console restarted, and the
+      // files can never be reused; refusing blocked every retry with a folder the player had to delete
+      // by hand (MyLuxy/overdrive issue #110). A later attempt's staging beside a silent worker of this
+      // session is still preserved, as is staging with no record at all, which names no run.
+      if (attempt || !recorded || owner.rfind("P5ST001:", 0) != 0) {
+        fail(job, "Staging belongs to another extraction; files preserved.");
+        return;
+      }
+      trace("discard stale staging", staging.c_str());
     }
     if (!restart_staging(staging, st)) {
       fail(job, "Cannot restart owned extraction staging.");

@@ -142,6 +142,15 @@ struct Transfer {
   CURLcode result = CURLE_OK;
 };
 
+// A range probe answered with the file's first bytes: a 206 for bytes 0..probe_length-1 (or fewer when
+// the file is shorter), all of them received.
+bool valid_prefix_response(const Transfer& t) {
+  const auto length = std::min(t.probe_length, t.range_total);
+  return t.status == 206 && t.content_range && length && t.range_begin == 0 &&
+    t.range_end == length-1 && t.accepted == length &&
+    (!t.length_known || t.content_length == length);
+}
+
 bool valid_file_response(const Transfer& t) {
   const Job& job = *t.job;
   if (!t.encoding.empty() && t.encoding != "identity") return false;
@@ -564,6 +573,36 @@ std::string host_of(const std::string& url) {
   return url.substr(start, end == std::string::npos ? std::string::npos : end-start);
 }
 
+// Whether the URL's host is one of `domains` or a name under one.
+template <std::size_t N>
+bool host_in(const std::string& url, const char* const (&domains)[N]) {
+  auto host = host_of(url);
+  // A port is not part of the domain; a bare IPv6 address keeps its colons and matches nothing.
+  if (const auto colon = host.rfind(':'); colon != std::string::npos && host.find(':') == colon)
+    host.resize(colon);
+  for (const char* domain : domains) {
+    const std::size_t length = std::strlen(domain);
+    if (host == domain) return true;
+    if (host.size() > length && host.compare(host.size()-length, length, domain) == 0 &&
+        host[host.size()-length-1] == '.') return true;
+  }
+  return false;
+}
+
+// FileKeeper's download gateways (edge01.fetchio.cc, tunnel<n>.dlproxy.uk) answer every range HTTP 503
+// with Retry-After 60 once a download passes about twenty connections, and the whole download then
+// waits the minute out: 18 connections ran at 7.4 MB/s without one, 40 drew 503s within seconds and
+// averaged 2.4 MB/s with the pauses (MyLuxy/overdrive issue #77, logs of 2026-10-25). Sixteen stay
+// under it; every other host keeps what the app asked for.
+bool connection_capped_gateway(const std::string& url) {
+  static const char* const domains[] = {"fetchio.cc", "dlproxy.uk"};
+  return host_in(url, domains);
+}
+
+unsigned connection_limit(const std::string& url, unsigned asked) {
+  return connection_capped_gateway(url) ? std::min(asked, 16u) : asked;
+}
+
 // The URL configure() requests for a range of this source on this mirror.
 const std::string& range_url(const Job& job, unsigned source, unsigned mirror) {
   if (!job.sources.empty()) {
@@ -753,6 +792,7 @@ private:
   bool check_sample(Job& job);
   void verify_mirrors(Job& job);
   CURLcode perform_probe(Transfer& probe);
+  CURLcode perform_prefix_probe(Transfer& probe);
   bool configure(Transfer& t);
   void finish_transfer(Transfer& t);
   void snapshot(Job& job, unsigned allowed, Clock::time_point now, Clock::time_point& previous,
@@ -1080,14 +1120,31 @@ CURLcode Service::perform_probe(Transfer& probe) {
   return probe.job->cancelled ? CURLE_ABORTED_BY_CALLBACK : result;
 }
 
+CURLcode Service::perform_prefix_probe(Transfer& probe) {
+  probe.probe_from = 0; probe.probe_length = 1; probe.accepted = 0;
+  if (!configure(probe)) return CURLE_FAILED_INIT;
+  auto result = perform_probe(probe);
+  // Some CDNs (Real-Debrid's among them) send the whole file for bytes=0-0 under a Content-Range that
+  // claims the one byte. A bounded prefix is asked for instead; the callers still check its exact
+  // span, total and the bytes received.
+  if (!probe.job->cancelled && result == CURLE_WRITE_ERROR &&
+      probe.error == "invalid range probe body" && probe.status == 206 &&
+      probe.content_range && probe.range_begin == 0 && probe.range_end == 0) {
+    platform_log("download: one-byte range response exceeded its bounds; retrying a 16-byte probe");
+    probe.probe_length = 16; probe.accepted = 0; probe.error.clear(); probe.sample.clear();
+    if (!configure(probe)) return CURLE_FAILED_INIT;
+    result = perform_probe(probe);
+  }
+  return result;
+}
+
 bool Service::probe_source(Job& job, unsigned source_index) {
   Transfer& probe = transfers_[0];
   probe.probe = true; probe.source = source_index;
   CURLcode result = CURLE_FAILED_INIT;
   for (unsigned attempt = 1;; ++attempt) {
-    probe.accepted = 0;
-    if (!configure(probe)) { job.fail(probe.error); return false; }
-    result = perform_probe(probe); probe.result = result;
+    result = perform_prefix_probe(probe); probe.result = result;
+    if (result == CURLE_FAILED_INIT && !probe.error.empty()) { job.fail(probe.error); return false; }
     if (job.cancelled) return false;
     if (attempt >= std::min(6u, attempt_limit(probe))) break;
     ++job.retries;
@@ -1105,8 +1162,7 @@ bool Service::probe_source(Job& job, unsigned source_index) {
   }
   if (probe.status == 200 && result == CURLE_WRITE_ERROR && probe.error.empty()) {
     job.known = probe.length_known; job.total = probe.content_length;
-  } else if (result == CURLE_OK && probe.status == 206 && probe.content_range &&
-             probe.range_begin == 0 && probe.range_end == 0 && probe.accepted == 1) {
+  } else if (result == CURLE_OK && valid_prefix_response(probe)) {
     job.known = true; job.total = probe.range_total;
     if (!probe.etag.empty() && !probe.etag.starts_with("W/")) job.etag = probe.etag;
     else job.last_modified = probe.last_modified;
@@ -1148,8 +1204,7 @@ void Service::verify_mirrors(Job& job) {
     if (job.cancelled) break;
     job.mirrors.push_back(url);
     probe.probe = true; probe.source = 0; probe.mirror = static_cast<unsigned>(job.mirrors.size()); probe.accepted = 0;
-    const bool same = configure(probe) && perform_probe(probe) == CURLE_OK && probe.status == 206 && probe.content_range &&
-      probe.range_begin == 0 && probe.range_end == 0 && probe.range_total == job.total &&
+    const bool same = perform_prefix_probe(probe) == CURLE_OK && valid_prefix_response(probe) && probe.range_total == job.total &&
       (job.etag.empty() ? !job.request.sha256.empty() : probe.etag == job.etag);
     if (!same) {
       job.mirrors.pop_back();
@@ -1187,6 +1242,8 @@ bool Service::check_sample(Job& job) {
 }
 
 bool Service::prepare(Job& job) {
+  // The checkpoint identity this job had while the storage root was part of it, accepted on resume.
+  std::string legacy_identity;
   if (!job.request.storage_root.empty()) {
     job.root_fd = open(job.request.storage_root.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
     if (job.root_fd < 0 || fstat(job.root_fd, &job.root_stat) != 0 || !storage_matches(job)) {
@@ -1226,23 +1283,30 @@ bool Service::prepare(Job& job) {
     if (count > max_ranges) { job.fail("too many ranges; increase rangeBytes (maximum 65536 ranges)"); return false; }
     job.completed.resize(static_cast<std::size_t>(count));
     // No URL: signed links change on every resolution while the file stays the same. The validator,
-    // size and hashes identify the bytes; the storage root and the sidecar's path identify the place.
-    Hash hash;
-    const auto validator = !job.etag.empty() ? "etag:"+job.etag : !job.last_modified.empty() ? "modified:"+job.last_modified : "size";
-    for (const auto& value : {validator, job.request.sha256, std::to_string(job.total)}) {
-      hash.update(value.data(), value.size()); hash.update("\0", 1);
-    }
-    for (const auto& source : job.sources) {
-      for (const auto& value : {source.etag, source.piece.sha1,
-                               std::to_string(source.piece.offset), std::to_string(source.piece.size)}) {
+    // size and hashes identify the bytes; the sidecar's path identifies the place. The storage root's
+    // device and inode were part of it once, and a USB drive gets new ones at every boot, so a download
+    // paused on one never resumed after a restart (MyLuxy/overdrive issue #94): that identity is still
+    // accepted when read, and the next checkpoint is written without it.
+    const auto checkpoint_identity = [&](bool with_root) {
+      Hash hash;
+      const auto validator = !job.etag.empty() ? "etag:"+job.etag : !job.last_modified.empty() ? "modified:"+job.last_modified : "size";
+      for (const auto& value : {validator, job.request.sha256, std::to_string(job.total)}) {
         hash.update(value.data(), value.size()); hash.update("\0", 1);
       }
-    }
-    if (job.root_fd >= 0) {
-      const auto identity = std::to_string(job.root_stat.st_dev)+":"+std::to_string(job.root_stat.st_ino);
-      hash.update(identity.data(), identity.size());
-    }
-    job.identity = hash.finish();
+      for (const auto& source : job.sources) {
+        for (const auto& value : {source.etag, source.piece.sha1,
+                                 std::to_string(source.piece.offset), std::to_string(source.piece.size)}) {
+          hash.update(value.data(), value.size()); hash.update("\0", 1);
+        }
+      }
+      if (with_root) {
+        const auto identity = std::to_string(job.root_stat.st_dev)+":"+std::to_string(job.root_stat.st_ino);
+        hash.update(identity.data(), identity.size());
+      }
+      return hash.finish();
+    };
+    job.identity = checkpoint_identity(false);
+    if (job.root_fd >= 0) legacy_identity = checkpoint_identity(true);
     if (job.identity.empty()) { job.fail("checkpoint identity hash failed"); return false; }
   }
   struct stat existing;
@@ -1259,7 +1323,9 @@ bool Service::prepare(Job& job) {
       existing.st_size >= 0 && static_cast<std::uint64_t>(existing.st_size) <= job.total && read_all(meta, &saved, sizeof saved) &&
       !std::memcmp(saved.magic, expected.magic, sizeof saved.magic) && saved.total == job.total &&
       saved.range_bytes == job.request.range_bytes && saved.count == job.completed.size() &&
-      !std::memcmp(saved.identity, job.identity.c_str(), 65) && read_all(meta, job.completed.data(), job.completed.size());
+      (!std::memcmp(saved.identity, job.identity.c_str(), 65) ||
+       (!legacy_identity.empty() && !std::memcmp(saved.identity, legacy_identity.c_str(), 65))) &&
+      read_all(meta, job.completed.data(), job.completed.size());
     if (meta >= 0) close(meta);
     for (unsigned char value : job.completed) if (value > 1) valid = false;
     if (!valid) { job.fail("partial file has no matching durable checkpoint; remove .part/.resume or choose another destination"); return false; }
@@ -1466,8 +1532,15 @@ void Service::run_job(const std::shared_ptr<Job>& job) {
       job->snapshot.written = job->snapshot.received = job->snapshot.completed_bytes = job->committed;
       job->snapshot.total = job->total; job->snapshot.total_known = job->known;
     }
-    const unsigned limit = job->ranged ? job->request.connections : 1;
+    // The probe above followed any redirect, so this is the URL the ranges will ask for.
+    const std::string target = range_url(*job, 0, 0);
+    const unsigned asked = job->ranged ? job->request.connections : 1;
+    const unsigned limit = connection_limit(target, asked);
     const unsigned initial = job->request.adaptive ? std::min(8u, limit) : limit;
+    if (asked > limit) {
+      platform_log(("download: " + host_of(target) + " is a FileKeeper gateway: " + std::to_string(limit) +
+        " connections instead of " + std::to_string(asked) + ", past which it answers 503 for a minute").c_str());
+    }
     std::vector<Window> windows;
     const auto window_for = [&](const std::string& url) {
       auto host = host_of(url);

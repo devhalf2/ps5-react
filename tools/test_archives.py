@@ -565,6 +565,12 @@ def main():
   orphan=root/"orphan.extracting";orphan.mkdir();(orphan/"keep").write_bytes(b"unowned")
   assert run("orphan",[zip])[0]=="failed"
   assert (orphan/"keep").read_bytes()==b"unowned"
+  # Staging recorded for another run of these inputs (an earlier session's, its parts changed since) is
+  # cleared and the extraction goes on.
+  stale=root/"stale.extracting";stale.mkdir();(stale/"unfinished").write_bytes(b"partial")
+  (stale/".ps5-react-stage").write_text("P5ST001:"+"0"*64+"\n")
+  assert run("stale",[zip])[0]=="completed"
+  assert (root/"stale/game.ffpfsc").read_bytes()==DATA and not stale.exists()
   # A crash before the ownership record leaves empty staging, which the next extraction takes over.
   (root/"abandoned.extracting").mkdir()
   assert run("abandoned",[zip])[0]=="completed"
