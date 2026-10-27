@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased — certificates for old firmwares
+
+- Networking apps ship Mozilla's root certificates (curl's `cacert.pem`, pinned as `caBundle`). At start the
+  PS5 host writes the console's own store plus the bundle into one file in the cache and hands curl that
+  path, so sites whose roots an old firmware never received (4.03: GitHub, image hosts) verify. Any failure
+  keeps the system store alone, as before; trust is only added. `python3 tools/ca_bundle.py` pins the newest
+  copy after checking that OpenSSL loads every certificate. Verified only by the build so far; the merge
+  runs on a console.
+
 ## Unreleased — 7z extraction on a full heap
 
 - A 7z the heap has no room for goes to rar-extract, whatever its dictionary. The in-process path needs the
