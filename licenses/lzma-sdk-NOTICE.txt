@@ -1,0 +1,7 @@
+LZMA SDK (7-Zip 26.05, C sources)
+
+rar-extract reads 7z archives and decodes LZMA and LZMA2 with these files from 7-Zip's source release
+(https://github.com/ip7z/7zip/releases/tag/26.05): 7zArcIn.c, 7zBuf.c, 7zCrc.c, 7zCrcOpt.c, 7zDec.c,
+7zStream.c, Alloc.c, Bcj2.c, CpuArch.c, Lzma2Dec.c, Lzma2DecMt.c, LzmaDec.c, MtDec.c, Threads.c and their
+headers, by Igor Pavlov. Each states: "Igor Pavlov : Public domain". patches/lzma-sdk-worker.patch gives
+the decoder's threads an explicit stack.

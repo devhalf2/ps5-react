@@ -50,8 +50,8 @@ bool download_progress(const std::string& path, std::uint64_t& prefix, std::uint
 bool fetch_range(const std::string& url, const std::vector<std::string>& headers, std::uint64_t offset, std::uint64_t length,
                  std::string& out, std::string& error);
 // RAR sets go to rar-extract (native/rar_worker), a program of its own: UnRAR's license keeps its code
-// out of this engine. So does a 7z whose decoder needs more memory than this heap gives, within the
-// worker's budget: the worker has the console's memory. The host starts it with `request` as its input
+// out of this engine. So does every 7z: the worker decodes LZMA2 on several cores, with the console's
+// memory rather than this heap. The host starts it with `request` as its input
 // (the console's payload loader, a child process on the desktop) and returns its stream, or -1 with
 // `error` when it cannot.
 int start_rar_worker(const std::string& request, std::string& error);
