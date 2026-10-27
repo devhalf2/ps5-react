@@ -375,6 +375,16 @@ def main():
             assert out["peakConnections"] <= connections, out
             return out
 
+        # One ranged GET of an archive's end, for an extraction ahead of its download; a server that ignores
+        # the range is stopped at once rather than read whole.
+        os.environ["NETWORK_TEST_FETCH_RANGE"] = f"{len(DATA)-4096}:4096"
+        try:
+            ranged = run("/file")
+            whole = run("/no-range")
+        finally:
+            del os.environ["NETWORK_TEST_FETCH_RANGE"]
+        assert ranged["state"] == "completed" and ranged["size"] == 4096 and ranged["head"] == DATA[-4096:][:16].hex(), ranged
+        assert whole["state"] == "failed" and whole["size"] <= 4096, whole
         assert json.loads(run("/json")["body"]) == {"value": 42}
         assert run("/not-found")["status"] == 404
         assert run("/json", method="HEAD")["body"] == ""
@@ -538,6 +548,8 @@ def main():
         elapsed = time.monotonic() - started
         assert out["state"] == "completed", out
         assert path.read_bytes() == LARGE
+        # Ranges finish out of order; the prefix an extraction may read only grows, and ends at the file.
+        assert out["prefixReads"] and not out["prefixDrops"] and not out["prefixOver"] and out["contiguous"] == len(LARGE), out
         refused = [(at, selected) for at, selected, status in Handler.tunnel if status == 503]
         assert refused, Handler.tunnel
         assert refused[-1][0] - refused[0][0] < 1, refused

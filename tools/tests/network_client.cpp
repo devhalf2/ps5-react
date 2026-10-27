@@ -8,6 +8,7 @@
 #include <csignal>
 #include <sys/resource.h>
 #include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <string>
 #include <thread>
@@ -31,6 +32,19 @@ int main(int argc, char** argv) {
     std::signal(SIGXFSZ, SIG_IGN);
   }
   if (!network::start()) return 3;
+  // NETWORK_TEST_FETCH_RANGE=<offset>:<length>: one ranged GET of the URL, its size and first bytes printed.
+  if (const char* range = std::getenv("NETWORK_TEST_FETCH_RANGE")) {
+    std::string out, error;
+    const std::uint64_t offset = std::strtoull(range, nullptr, 10), length = std::strtoull(std::strchr(range, ':')+1, nullptr, 10);
+    const bool ok = network::fetch_range(argv[1], {}, offset, length, out, error);
+    std::string head;
+    for (std::size_t i = 0; i < std::min<std::size_t>(out.size(), 16); ++i) {
+      char hex[3]; std::snprintf(hex, sizeof hex, "%02x", static_cast<unsigned char>(out[i])); head += hex;
+    }
+    std::cout << "{\"state\":" << escaped(ok ? "completed" : "failed") << ",\"error\":" << escaped(error) << ",\"size\":" << out.size()
+      << ",\"head\":" << escaped(head) << ",\"peakBuffer\":0,\"peakConnections\":0}\n";
+    network::stop(); return ok ? 0 : 1;
+  }
   network::Request request;
   request.url = argv[1];
   if (std::string(argv[2]) != "-") request.destination = argv[2];
@@ -65,6 +79,7 @@ int main(int argc, char** argv) {
     request.expected_bytes = offset;
   }
   std::string error;
+  const std::string destination = request.destination;
   const auto id = network::enqueue(std::move(request), error);
   if (!id) { std::cerr << error << '\n'; network::stop(); return 4; }
   const char* deadline = std::getenv("NETWORK_TEST_DEADLINE_MS");
@@ -76,6 +91,9 @@ int main(int argc, char** argv) {
   std::int64_t first_completed = -1;
   std::uint64_t last_completed = 0;
   unsigned completed_drops = 0;
+  // What network::progress_of reported for the destination: how often its prefix went down or past the total.
+  std::uint64_t last_prefix = 0;
+  unsigned prefix_drops = 0, prefix_over = 0, prefix_reads = 0;
   // NETWORK_TEST_BESIDE: a request answered in memory, queued once the download is under way, and the
   // download's state when that request ended.
   const char* beside_url = std::getenv("NETWORK_TEST_BESIDE");
@@ -97,6 +115,12 @@ int main(int argc, char** argv) {
       if (!beside_id) { std::cerr << error << '\n'; network::stop(); return 4; }
       beside_queued = elapsed;
     }
+    if (std::uint64_t prefix = 0, total = 0; !destination.empty() && network::progress_of(destination, prefix, total)) {
+      ++prefix_reads;
+      if (prefix < last_prefix) ++prefix_drops;
+      if (total && prefix > total) ++prefix_over;
+      last_prefix = prefix;
+    }
     for (const auto& result : network::poll()) {
       if (beside_id && result.id == beside_id) {
         if (result.state == "completed" || result.state == "failed" || result.state == "cancelled") {
@@ -116,7 +140,8 @@ int main(int argc, char** argv) {
         std::cout << "{\"state\":" << escaped(result.state) << ",\"error\":" << escaped(result.error)
           << ",\"body\":" << escaped(result.body) << ",\"written\":" << result.written
           << ",\"completedBytes\":" << result.completed_bytes << ",\"firstCompleted\":" << first_completed
-          << ",\"completedDrops\":" << completed_drops
+          << ",\"completedDrops\":" << completed_drops << ",\"contiguous\":" << result.contiguous_bytes
+          << ",\"prefixReads\":" << prefix_reads << ",\"prefixDrops\":" << prefix_drops << ",\"prefixOver\":" << prefix_over
           << ",\"url\":" << escaped(result.url) << ",\"headers\":{";
         bool first = true;
         for (const auto& [name, value] : result.headers) {

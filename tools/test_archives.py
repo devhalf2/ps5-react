@@ -192,7 +192,7 @@ def seven_zip_sdk(root,binary):
  assert not (root/"x.bin").exists()
  # While it downloads: the bytes arrive in order into <file>.part, the engine's progress in <file>.avail;
  # the end of the archive (its headers) comes from the tail URL first. The download then publishes the file.
- def download(name,archive,tail=True,step=1<<20,pause=0.002):
+ def download(name,archive,tail=True,step=1<<20,pause=0.002,publish_after=0):
   path=root/"downloads"/f"{name}.7z";path.parent.mkdir(exist_ok=True)
   blob=archive.read_bytes();part=Path(str(path)+".part");avail=Path(str(path)+".avail")
   part.write_bytes(blob[:32]);avail.write_text(f"32 {len(blob)}")
@@ -203,13 +203,18 @@ def seven_zip_sdk(root,binary):
    for at in range(32,len(blob),step):
     f.seek(at);f.write(blob[at:at+step]);f.flush()
     avail.write_text(f"{min(at+step,len(blob))} {len(blob)}");time.sleep(pause)
-  # Published: the download is over.
+  # Every byte is in before the download is verified and published: the extraction waits for that.
+  time.sleep(publish_after)
   os.rename(part,path);avail.unlink()
   out,trace=process.communicate(timeout=120)
   return out.splitlines(),trace
  out,trace=download("stream-mx1",root/"sdk-mx1.7z")
  assert out[0]=="completed" and "7z tail fetched" in trace and "decoder=sdk" in trace,(out,trace)
  same("stream-mx1")
+ # Decoded before the download is published, it ends with the published file.
+ out,trace=download("stream-late",root/"sdk-mx1.7z",step=8<<20,pause=0,publish_after=1.5)
+ assert out[0]=="completed",(out,trace)
+ same("stream-late")
  # Without the tail, the headers are read once the download reaches them.
  out,trace=download("stream-no-tail",root/"sdk-nonsolid.7z",tail=False)
  assert out[0]=="completed" and "7z tail fetched" not in trace,(out,trace)
@@ -218,7 +223,6 @@ def seven_zip_sdk(root,binary):
  out,trace=download("stream-bcj",root/"sdk-bcj.7z")
  assert out[0]=="failed" and out[2]=="This 7z can't be extracted while it downloads.",(out,trace)
  assert not (root/"stream-bcj").exists() and not (root/"stream-bcj.extracting").exists()
- # Decoding keeps pace with a slow download: most of the archive is extracted before its last bytes arrive.
  print("PASS: 7-Zip archives through the LZMA SDK, on several threads, and while they download")
 
 def main():

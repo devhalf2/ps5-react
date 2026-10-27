@@ -215,6 +215,13 @@ public:
     return true;
   }
   bool growing() const { return growing_; }
+  // Until the download is published under its final name: it is verified and synced first, and the engine
+  // records the extraction against that file. False on a stop.
+  bool published() {
+    while (growing_ && !grown_whole)
+      if (!pause()) return false;
+    return true;
+  }
   std::uint64_t waited_ns = 0;
 
 private:
@@ -761,6 +768,7 @@ std::string extract_sdk(const Options& options, Input& input, Writer& writer, Pr
   for (std::uint32_t i = 0; i < folders.size() && !stopping(); ++i)
     if (const auto error = decode(input, i, folders[i], plans[i], files); !error.empty()) return error;
   if (stopping() || !files.reach(no_folder)) return files.error;
+  input.published();
   return {};
 }
 
