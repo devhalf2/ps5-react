@@ -95,8 +95,8 @@ bool archives::download_progress(const std::string& path, std::uint64_t& prefix,
   return network::progress_of(path, prefix, total);
 }
 bool archives::fetch_range(const std::string& url, const std::vector<std::string>& headers, std::uint64_t offset, std::uint64_t length,
-                           std::string& out, std::string& error) {
-  return network::fetch_range(url, headers, offset, length, out, error);
+                           std::string& out, std::string& error, const std::atomic<bool>& cancelled) {
+  return network::fetch_range(url, headers, offset, length, out, error, &cancelled);
 }
 // rar-extract.elf goes to the payload loader as the package installer does, and reports on the socket.
 int archives::start_rar_worker(const std::string& request, std::string& error) {

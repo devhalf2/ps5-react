@@ -335,9 +335,23 @@ SRes range_read(ISeqInStreamPtr p, void* data, size_t* size) {
   return SZ_OK;
 }
 
-// The header's allocations, each refused past what a sane header needs.
-void* header_alloc(ISzAllocPtr, size_t size) { return size > max_header_allocation ? nullptr : std::malloc(size); }
-void header_free(ISzAllocPtr, void* address) { std::free(address); }
+// The header's allocations, each and all together refused past what a sane header needs: a streamed 7z's
+// headers have had no preflight.
+std::atomic<std::uint64_t> header_bytes{0};
+void* header_alloc(ISzAllocPtr, size_t size) {
+  if (size > max_header_allocation || header_bytes + size > 2 * max_header_allocation) return nullptr;
+  auto* block = static_cast<std::uint64_t*>(std::malloc(size + 16));
+  if (!block) return nullptr;
+  *block = size;
+  header_bytes += size;
+  return block + 2;
+}
+void header_free(ISzAllocPtr, void* address) {
+  if (!address) return;
+  auto* block = static_cast<std::uint64_t*>(address) - 2;
+  header_bytes -= *block;
+  std::free(block);
+}
 const ISzAlloc header_allocator = {header_alloc, header_free};
 
 std::uint64_t lzma2_dictionary(Byte property) {
@@ -749,24 +763,36 @@ std::string extract_sdk(const Options& options, Input& input, Writer& writer, Pr
     total += size;
   }
   say("d " + std::to_string(total));
-  // Each folder's plan; the memory the largest needs is claimed before anything is written.
   const std::uint64_t room = options.cap;
-  std::vector<Plan> plans(folders.size());
-  std::uint64_t memory = 1 << 20;
-  for (size_t i = 0; i < folders.size(); ++i) {
-    if (folder_dictionary(folders[i]) > room) return too_much_memory;
-    plans[i] = plan(input, folders[i], options.threads, room);
-    if (stopping()) return {};
-    memory = std::max(memory, plans[i].memory);
-    if (plans[i].threads > report.threads) {
-      report.threads = plans[i].threads;
-      report.block = plans[i].block;
-    }
-  }
-  if (const auto refused = claim(memory + overhead, report.claim_ms); !refused.empty()) return refused;
+  for (const auto& folder : folders)
+    if (folder_dictionary(folder) > room) return too_much_memory;
+  // Folders whose files hold no bytes: 7-Zip writes none, but the format allows them.
+  std::vector<bool> holds(folders.size());
+  for (std::uint32_t i = 0; i < db.NumFiles; ++i)
+    if (!SzArEx_IsDir(&db, i) && db.FileToFolder[i] != no_folder && SzArEx_GetFileSize(&db, i)) holds[db.FileToFolder[i]] = true;
   Files files(db, options, writer, progress);
-  for (std::uint32_t i = 0; i < folders.size() && !stopping(); ++i)
-    if (const auto error = decode(input, i, folders[i], plans[i], files); !error.empty()) return error;
+  std::uint64_t claimed = 0;
+  for (std::uint32_t i = 0; i < folders.size() && !stopping(); ++i) {
+    if (!holds[i]) {
+      if (folders[i].unpack_size) return damaged;
+      continue;
+    }
+    // Each folder is planned as the download reaches it, and its memory claimed when it needs more than
+    // what an earlier one took.
+    const Plan run = plan(input, folders[i], options.threads, room);
+    if (stopping()) break;
+    if (run.memory > claimed) {
+      std::uint64_t took = 0;
+      if (const auto refused = claim(run.memory + overhead, took); !refused.empty()) return refused;
+      report.claim_ms += took;
+      claimed = run.memory;
+    }
+    if (run.threads > report.threads) {
+      report.threads = run.threads;
+      report.block = run.block;
+    }
+    if (const auto error = decode(input, i, folders[i], run, files); !error.empty()) return error;
+  }
   if (stopping() || !files.reach(no_folder)) return files.error;
   input.published();
   return {};

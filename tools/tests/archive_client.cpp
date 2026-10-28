@@ -18,7 +18,7 @@ bool archives::downloading(){return std::getenv("ARCHIVE_DOWNLOADING")!=nullptr;
 bool archives::download_progress(const std::string& path,std::uint64_t& prefix,std::uint64_t& total){
  std::ifstream in(path+".avail");unsigned long long p=0,t=0;if(!(in>>p>>t))return false;prefix=p;total=t;return true;}
 // file://<path> URLs only: the range is read from that file.
-bool archives::fetch_range(const std::string& url,const std::vector<std::string>&,std::uint64_t offset,std::uint64_t length,std::string& out,std::string& error){
+bool archives::fetch_range(const std::string& url,const std::vector<std::string>&,std::uint64_t offset,std::uint64_t length,std::string& out,std::string& error,const std::atomic<bool>&){
  if(url.rfind("file://",0)!=0){error="tests fetch file:// URLs only";return false;}
  std::ifstream in(url.substr(7),std::ios::binary);in.seekg(std::streamoff(offset));out.assign(length,'\0');
  if(!in.read(out.data(),std::streamsize(length))){error="short range";return false;}return true;}

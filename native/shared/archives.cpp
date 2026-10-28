@@ -839,7 +839,7 @@ bool fetch_tail(Job& job, const std::string& path, std::uint64_t& offset) {
   const std::uint64_t header = 32 + little(12), size = little(20);
   if (!size || size > max_metadata_bytes || header > total || size > total - header || prefix >= header + size) return false;
   std::string bytes, error;
-  if (!fetch_range(request.tail_url, request.tail_headers, header, size, bytes, error)) {
+  if (job.cancelled || !fetch_range(request.tail_url, request.tail_headers, header, size, bytes, error, job.cancelled)) {
     trace("7z headers not fetched", error.c_str());
     return false;
   }
@@ -851,7 +851,7 @@ bool fetch_tail(Job& job, const std::string& path, std::uint64_t& offset) {
       seven_zip_number(bytes, at, streams) && streams && at < bytes.size() && bytes[at++] == 0x09 && seven_zip_number(bytes, at, packed) &&
       32 + position < header && header - (32 + position) <= max_metadata_bytes && packed <= header - (32 + position) && prefix < header) {
     std::string before;
-    if (!fetch_range(request.tail_url, request.tail_headers, 32 + position, header - (32 + position), before, error)) {
+    if (!fetch_range(request.tail_url, request.tail_headers, 32 + position, header - (32 + position), before, error, job.cancelled)) {
       trace("7z packed header not fetched", error.c_str());
       return false;
     }
@@ -928,6 +928,8 @@ void run(const std::shared_ptr<Job>& pointer) {
     const bool lines = request.destination.find('\n') == std::string::npos &&
         std::none_of(request.sources.begin(), request.sources.end(), [](const std::string& path) { return path.find('\n') != std::string::npos; });
     // A 7z's headers are at its end: the worker checks them once it has them.
+    // libarchive reads a 7z with a password, and only once complete.
+    if (seven_zip_streamed && !request.password.empty()) return std::string("This 7z can't be extracted while it downloads.");
     if (seven_zip_streamed) return lines ? std::string() : std::string("Only a RAR set or a 7z can be extracted while it downloads.");
     const auto found = inspect({request.sources.front()});
     return found.kind != "rar" || !lines ? std::string("Only a RAR set or a 7z can be extracted while it downloads.") : found.refusal;
@@ -1026,11 +1028,12 @@ void run(const std::shared_ptr<Job>& pointer) {
     if (!extract_worker(job, staging, receipt, error, seven_zip_request(request, staging, seven_zip_memory), "7z") && error.empty())
       error = "This archive needs the payload loader to extract: none answered on port 9021.";
   } else if (rar_volumes(request) && extract_rar(job, staging, receipt, error)) {
-  } else if (seven_zip_source(request) && lines &&
+  } else if (seven_zip_source(request) && lines && request.password.empty() &&
              extract_worker(job, staging, receipt, error,
                             seven_zip_request(request, staging, std::max<std::uint64_t>(seven_zip_memory, 1ULL << 20)), "7z")) {
     // Every 7z goes to rar-extract: LZMA2 decodes there on several cores, and the heap keeps its room.
-    // libarchive tries it here only when the worker cannot start.
+    // libarchive tries it here only when the worker cannot start, and takes one with a password, which the
+    // worker does not read.
   } else {
     const MemoryHold memory;
     std::unique_ptr<Rar5PasswordReader> decrypted;

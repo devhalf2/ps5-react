@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Additional attribution term: see LICENSE-ATTRIBUTION.
 #pragma once
+#include <atomic>
 #include <cstdint>
 #include <string>
 #include <utility>
@@ -50,10 +51,11 @@ bool downloading();
 // How far the download to `destination` has come: its first `prefix` bytes are on disk (in
 // `destination`.part), of `total` (0 until known). False when no unfinished download writes it. Any thread.
 bool progress_of(const std::string& destination, std::uint64_t& prefix, std::uint64_t& total);
-// One ranged GET of `length` bytes of `url` from `offset`, with `headers`, waited for and kept in `out`.
-// For an extraction that reads an archive's directory, kept at its end, before its download reaches it.
+// One ranged GET of `length` bytes of `url` from `offset`, with `headers`, waited for and kept in `out`;
+// `cancelled` (optional) stops it within a second. For an extraction that reads an archive's directory,
+// kept at its end, before its download reaches it.
 bool fetch_range(const std::string& url, const std::vector<std::string>& headers, std::uint64_t offset,
-                 std::uint64_t length, std::string& out, std::string& error);
+                 std::uint64_t length, std::string& out, std::string& error, const std::atomic<bool>* cancelled = nullptr);
 const char* version();
 // Applies the transport policy every request shares (protocols, redirects, TLS trust, timeouts,
 // identity encoding and the PS5 socket options) to a libcurl easy handle.

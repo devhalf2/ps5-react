@@ -5,7 +5,7 @@ import http.server, os, random, re, shutil, subprocess, tempfile, threading, tim
 from rar_worker import build_host
 
 ROOT = Path(__file__).resolve().parents[1]
-RATE = 16 * 1024 * 1024  # bytes per second across the 8 connections
+RATE = 8 * 1024 * 1024  # bytes per second across the 8 connections: a download of about 4 s
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -86,8 +86,9 @@ def main():
         downloaded, early = map(int, lines["downloaded"].split())
         finished = int(lines["extracted"].split()[1])
         # Decoded as it arrived: most of the game was written before the download ended. What is left is about
-        # the ranges in flight at the end (8 of 1 MiB here, a quarter of the archive).
-        assert early >= game.stat().st_size // 2, (early, game.stat().st_size)
+        # the ranges in flight at the end (8 of 1 MiB here, a quarter of the archive), and the progress reports'
+        # quarter-second steps.
+        assert early >= game.stat().st_size // 2, (early, game.stat().st_size, [l for l in result.stderr.splitlines() if l.startswith("t=")][::25])
         print(f"PASS: a {len(Handler.archive) >> 20} MiB 7z downloaded in {downloaded} ms, {early * 100 // game.stat().st_size}% "
               f"extracted by then and all of it {finished - downloaded} ms later")
 

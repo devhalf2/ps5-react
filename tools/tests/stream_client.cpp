@@ -20,8 +20,8 @@ bool archives::download_progress(const std::string& path, std::uint64_t& prefix,
   return network::progress_of(path, prefix, total);
 }
 bool archives::fetch_range(const std::string& url, const std::vector<std::string>& headers, std::uint64_t offset, std::uint64_t length,
-                           std::string& out, std::string& error) {
-  return network::fetch_range(url, headers, offset, length, out, error);
+                           std::string& out, std::string& error, const std::atomic<bool>& cancelled) {
+  return network::fetch_range(url, headers, offset, length, out, error, &cancelled);
 }
 bool archives::list_directory(const char* path, void (*visit)(const char*, void*), void* user) {
   DIR* d = opendir(path);
@@ -51,6 +51,10 @@ int main(int argc, char** argv) {
   std::string extracted;
   std::uint64_t written = 0;
   while (extracted.empty() && ms() < 120000) {
+    if (std::getenv("STREAM_TRACE")) {
+      std::uint64_t prefix = 0, total = 0;
+      if (network::progress_of(argv[2], prefix, total)) std::cerr << "t=" << ms() << " prefix=" << (prefix >> 20) << " written=" << (written >> 20) << "\n";
+    }
     for (const auto& s : network::poll()) {
       // As the app does, once the partial file exists: here once the download knows its size.
       if (!extract_id && s.total_known && s.written > 0) {

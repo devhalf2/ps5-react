@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Additional attribution term: see LICENSE-ATTRIBUTION.
 #pragma once
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -46,9 +47,10 @@ bool downloading();
 // How far the host's download to `path` has come: its first `prefix` bytes are on disk, of `total` (0 until
 // known). False when no unfinished download writes `path`. Cheap, any thread.
 bool download_progress(const std::string& path, std::uint64_t& prefix, std::uint64_t& total);
-// `length` bytes of `url` from `offset`, with `headers`, in `out`: one ranged request the host waits for.
+// `length` bytes of `url` from `offset`, with `headers`, in `out`: one ranged request the host waits for,
+// stopped once `cancelled` is set.
 bool fetch_range(const std::string& url, const std::vector<std::string>& headers, std::uint64_t offset, std::uint64_t length,
-                 std::string& out, std::string& error);
+                 std::string& out, std::string& error, const std::atomic<bool>& cancelled);
 // RAR sets go to rar-extract (native/rar_worker), a program of its own: UnRAR's license keeps its code
 // out of this engine. So does every 7z: the worker decodes LZMA2 on several cores, with the console's
 // memory rather than this heap. The host starts it with `request` as its input
