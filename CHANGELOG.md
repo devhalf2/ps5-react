@@ -14,6 +14,12 @@
   (`embeddedReact-anim-handle-wrap.patch`; `test_animation` covers 70,000 values beside a long-lived one,
   the bridge's `anim-dropped` runtime test 300 animations of a destroyed value.)
 
+## Unreleased — home-screen backgrounds as DDS
+
+- The PS5 build copies `pic0.dds` and `pic1.dds` from an app's `sce_sys/` beside its PNGs, so the home screen
+  can show the app's background. `tools/verify.py` checks that both or neither are there, each a 3840×2160
+  BC7_UNORM DDS with a DX10 header and one mip level (`tools/test_sce_art.py`). Not yet seen on a console.
+
 ## Unreleased — 7z on every core, and while it downloads
 
 - Every 7z goes to rar-extract, which now reads 7z archives with the LZMA SDK (7-Zip 26.05's public-domain C
