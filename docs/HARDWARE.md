@@ -269,6 +269,9 @@ screens, except that on return to Home the branch keeps the scrolled row.
 
 - `Power.keepAwake` (ABI v4, `sceSystemServicePowerTick` every 30 s): builds,
   but no console has been observed staying out of rest mode with it on.
+- Home-screen backgrounds from `sce_sys/pic0.dds` and `pic1.dds` (3840×2160 BC7,
+  the header snes9xPS5 and PS5_Ghostship ship): the build copies them and
+  verify checks them, but no console has been observed showing them.
 
 ## Remote images — 2026-10-06
 
