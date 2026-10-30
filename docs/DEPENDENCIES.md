@@ -124,6 +124,11 @@ same unit.
 upstream) scrolls a ScrollView by copy over a layer image that covers its
 viewport, and lets the render workers capture the fade cache together, each its
 own rows, instead of rendering a single-core frame for it.
+`embeddedReact-anim-handle-wrap.patch` (Apache-2.0 animation engine, bridge and
+tests; not yet proposed upstream) keeps the 16-bit animation handle counter,
+once it wraps, from giving out a handle a live value, animation or group still
+holds, and ends an animation the engine cannot run instead of keeping its
+completion slot.
 Patches apply in the order the lock lists them, and may add files.
 
 `tools/bundle.mjs` adapts upstream Apache-2.0 tooling and preserves its notice.

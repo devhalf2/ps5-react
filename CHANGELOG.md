@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased — animation handles after a long session
+
+- Animated values, animations and groups share one 16-bit handle counter, and every animation started takes
+  a handle. Past 65,535 it wrapped and gave out handles still held: a new value then bound and drove an older
+  value's node (on a desktop preview of Pandora, the header's Browse tab went invisible once a held key had
+  taken about 3,600 steps through the Top rated grid, some seven minutes at the held-key rate, and stayed
+  so), and destroying it freed the older value and leaked its own slot. Once the counter has wrapped,
+  handles still held are skipped.
+- An animation the engine cannot run (its value gone, or all 256 animation slots busy) never called its
+  completion, so its JS callback kept one of the bridge's 256 completion slots; with all of them taken, no
+  animation told Motion it had ended. It now ends at once, not finished, and frees the slot.
+  (`embeddedReact-anim-handle-wrap.patch`; `test_animation` covers 70,000 values beside a long-lived one,
+  the bridge's `anim-dropped` runtime test 300 animations of a destroyed value.)
+
 ## Unreleased — 7z on every core, and while it downloads
 
 - Every 7z goes to rar-extract, which now reads 7z archives with the LZMA SDK (7-Zip 26.05's public-domain C
