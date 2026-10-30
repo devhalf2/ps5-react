@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased — certificates for old firmwares
+
+- Networking apps ship Mozilla's root certificates (curl's `cacert.pem`, pinned as `caBundle`). At start the
+  PS5 host writes the console's own store plus the bundle into one file in the cache and hands curl that
+  path, so sites whose roots an old firmware never received (4.03: GitHub, image hosts) verify. Any failure
+  keeps the system store alone, as before; trust is only added. `python3 tools/ca_bundle.py` pins the newest
+  copy after checking that OpenSSL loads every certificate. Verified only by the build so far; the merge
+  runs on a console.
+
 ## Unreleased — PS5 packages
 
 - A PS5 package (`\x7FFIH`) is a package like a PS4 one (`\x7FCNT`): extraction lists it as an artifact,
@@ -9,15 +18,6 @@
   at 0x58 (checked on 16 PS5 packages from archive.org: 0x80000, 0xA0000, or near the end of an 87 GB one)
   and fails with "The PS5 package is incomplete." when the file ends before it. The install call is the
   one PS4 packages use; no PS5 package has been installed through it on a console yet.
-
-## Unreleased — certificates for old firmwares
-
-- Networking apps ship Mozilla's root certificates (curl's `cacert.pem`, pinned as `caBundle`). At start the
-  PS5 host writes the console's own store plus the bundle into one file in the cache and hands curl that
-  path, so sites whose roots an old firmware never received (4.03: GitHub, image hosts) verify. Any failure
-  keeps the system store alone, as before; trust is only added. `python3 tools/ca_bundle.py` pins the newest
-  copy after checking that OpenSSL loads every certificate. Verified only by the build so far; the merge
-  runs on a console.
 
 ## Unreleased — downloads and extraction from the Overdrive fork
 
