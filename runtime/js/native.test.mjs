@@ -238,7 +238,7 @@ test('archive and download task IDs are isolated while sharing the polling timer
   try {
     const download = Downloads.enqueue({url: 'https://example.com/file', destination: '/download0/file'});
     const archive = Archives.extract({sources: ['/download0/file'], destination: '/download0/out', password: '[DLPSGAME.COM]'});
-    assert.deepEqual(extractions, [[['/download0/file'], '/download0/out', 1024**4, '[DLPSGAME.COM]', false]]);
+    assert.deepEqual(extractions, [[['/download0/file'], '/download0/out', 1024**4, '[DLPSGAME.COM]', false, null, []]]);
     assert.equal(Archives.streams, true);
     for (const password of [42, 'bad\0password', 'x'.repeat(1025)])
       assert.throws(() => Archives.extract({sources: ['/download0/file'], destination: '/download0/out', password}), /password/);
@@ -251,6 +251,13 @@ test('archive and download task IDs are isolated while sharing the polling timer
     assert.equal(download.snapshot.state, 'queued');
     networkSnapshots = [{id: 1, state: 'completed', written: 100}]; tick();
     assert.equal((await download.done).written, 100);
+    // A downloading 7z: its address and headers, as "Name: value" lines, for the engine to fetch its end.
+    const streamed = Archives.extract({sources: ['/download0/file'], destination: '/download0/out', stream: true,
+      tail: {url: 'https://example.com/file', headers: {Cookie: 'a=b'}}});
+    assert.deepEqual(extractions.pop(), [['/download0/file'], '/download0/out', 1024**4, '', true, 'https://example.com/file', ['Cookie: a=b']]);
+    assert.equal(Archives.streamsSevenZip, true);
+    archiveSnapshots = [{id: 1, state: 'completed', written: 0, artifacts: []}]; tick();
+    await streamed.done;
   } finally {
     globalThis.setInterval = originalInterval; globalThis.clearInterval = originalClear;
     delete globalThis.__ps5ReactNative;

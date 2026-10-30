@@ -51,7 +51,10 @@
 //     terminal snapshots: status, body, effective url, allowlisted lowercase headers
 //   network.cancel(id)             requests cancellation
 //   network.poll()                 progress/results; consumes terminal snapshots
-//   archives.extract(sources, destination, maxBytes) task ID; bounded native archive worker
+//   archives.extract(sources, destination, maxBytes, password, stream, tailUrl, tailHeaders) task ID;
+//                                  bounded native archive worker; RAR sets and 7z go to rar-extract.
+//                                  stream: a RAR set or 7z still downloading; tailUrl/tailHeaders ("Name:
+//                                  value") let the engine fetch a downloading 7z's headers ahead
 //   archives.inspect(sources)      {kind, refusal}; file type from leading bytes and, for an archive,
 //                                  a decoder-memory refusal its headers so far justify; partial files ok.
 //                                  Read on a worker; after 25 ms, the previous answer with pending: true

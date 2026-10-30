@@ -352,11 +352,14 @@ export const Downloads = {
 /** Streaming archive extraction off-thread; source volumes are preserved on failure/cancel. */
 export const Archives = Object.freeze({
   /** `stream: true` starts a RAR set while its later volumes still download: only the first must exist;
-   * each next one is read once a file appears under its final name (write volumes elsewhere and rename). */
-  extract({sources, destination, maxBytes = 1024**4, password, stream = false}) {
+   * each next one is read once a file appears under its final name (write volumes elsewhere and rename).
+   * It also starts a 7z while `Downloads.enqueue` still writes it to its one source: `tail` ({url, headers},
+   * what the download requests) lets the engine fetch its end, where its headers are, ahead of the download. */
+  extract({sources, destination, maxBytes = 1024**4, password, stream = false, tail}) {
     if (password != null && (typeof password !== 'string' || password.length > 1024 || password.includes('\0')))
       throw new TypeError('Archives.extract: password must be a string without NUL, at most 1024 UTF-8 bytes.');
-    const id = host().archives.extract(sources, destination, maxBytes, password ?? '', stream === true);
+    const headers = Object.entries(tail?.headers ?? {}).map(([name, value]) => `${name}: ${value}`);
+    const id = host().archives.extract(sources, destination, maxBytes, password ?? '', stream === true, tail?.url ?? null, headers);
     return networkTask(id, 'Archives.extract', destination, 'archives');
   },
   /** What the files' leading bytes are, and why their headers so far already rule out extraction.
@@ -368,6 +371,8 @@ export const Archives = Object.freeze({
   inspect: sources => host().archives.inspect(sources),
   /** Whether `extract` takes `stream`. */
   streams: true,
+  /** Whether `extract` takes `stream` for a downloading 7z, and `tail`. */
+  streamsSevenZip: true,
 });
 
 /**

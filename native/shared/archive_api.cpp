@@ -4,6 +4,7 @@
 #include "host_api.hpp"
 #include "archives.hpp"
 #include "archive_preflight.hpp"
+#include <cctype>
 #include <climits>
 #include <cmath>
 #include <cstring>
@@ -51,6 +52,34 @@ JSValue extract(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
     request.sources.push_back(std::move(file));
   }
   if (argc > 4) request.stream = JS_ToBool(ctx,argv[4]) == 1;
+  // A downloading 7z's URL and request headers ("Name: value"), for the engine to fetch its end ahead.
+  if (argc > 5 && JS_IsString(argv[5])) {
+    const char* url = JS_ToCString(ctx,argv[5]);
+    if (!url) return JS_EXCEPTION;
+    request.tail_url = url;
+    JS_FreeCString(ctx,url);
+    if (request.tail_url.size() > 8192 || (request.tail_url.rfind("https://",0) && request.tail_url.rfind("http://",0)))
+      return JS_ThrowTypeError(ctx,"archives.extract: tailUrl must be an http(s) URL");
+  }
+  if (argc > 6 && JS_IsArray(argv[6])) {
+    const JSValue count_value = JS_GetPropertyStr(ctx,argv[6],"length"); std::uint32_t count = 0;
+    const int counted = JS_ToUint32(ctx,&count,count_value); JS_FreeValue(ctx,count_value);
+    if (counted || count > 32) return JS_ThrowTypeError(ctx,"archives.extract: at most 32 tail headers");
+    for (std::uint32_t i = 0; i < count; ++i) {
+      const JSValue value = JS_GetPropertyUint32(ctx,argv[6],i);
+      const char* text = JS_IsString(value) ? JS_ToCString(ctx,value) : nullptr;
+      JS_FreeValue(ctx,value);
+      std::string header = text ? text : "";
+      if (text) JS_FreeCString(ctx,text);
+      std::string name = header.substr(0, header.find(':'));
+      for (char& c : name) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+      // The engine sets the range itself.
+      if (header.empty() || header.size() > 2048 || header.find(':') == std::string::npos || header.find_first_of("\r\n") != std::string::npos ||
+          name == "range" || name == "if-range" || name == "host" || name == "content-length" || name == "connection")
+        return JS_ThrowTypeError(ctx,"archives.extract: invalid tail header");
+      request.tail_headers.push_back(std::move(header));
+    }
+  }
   std::string error; const auto id = archives::enqueue(std::move(request),error);
   if (!id) return JS_ThrowPlainError(ctx,"archives.extract: %s",error.c_str());
   return JS_NewUint32(ctx,id);

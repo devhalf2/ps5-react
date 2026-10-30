@@ -1,5 +1,34 @@
 # Changelog
 
+## Unreleased — 7z on every core, and while it downloads
+
+- Every 7z goes to rar-extract, which now reads 7z archives with the LZMA SDK (7-Zip 26.05's public-domain C
+  sources, pinned as `lzmaSdk`). LZMA2 decodes on up to 6 threads (4 while a download runs) when its stream
+  is cut into independent blocks, as 7-Zip's multithreaded compression writes it, and as many threads as fit
+  the worker's 352 MiB decoder budget: 7-Zip's fastest level (1 MiB blocks, what large game repacks use) gets
+  all of them, its normal level (128 MiB blocks) one or two, ultra (256 MiB) one. LZMA and stored folders
+  decode on one thread; anything else (branch filters, PPMd, BCJ2, zstd, encryption) goes to libarchive in the
+  worker as before, and libarchive in the app only when the worker cannot start. Each file's CRC is checked.
+  On the Mac, 391 MiB of a real 48 GB repack (LZMA2, 256 KiB dictionary, 1 MiB blocks) extracted in 1.2–1.6 s
+  instead of 5.4–5.6 s, byte for byte the same.
+- A 7z extracts while it downloads. `Archives.extract({stream: true, tail: {url, headers}})` on a single
+  downloading 7z (`Archives.streamsSevenZip`): the engine reads where its headers are from its first 32
+  bytes, fetches them (and the packed header an encoded one decodes from) with ranged GETs of a few KiB into
+  `<destination>.tail`, and the worker decodes each folder as the download's contiguous prefix
+  (`network::progress_of`, from the ranges complete in order) reaches it. The extraction ends once the
+  download is published under its final name, about when it does: 0.2 s after a simulated 20–80 MB/s download
+  of the same repack, and with the native downloader against a paced local server (`tools/test_stream7z.py`)
+  most of the files are written before the download ends. A 7z only libarchive reads fails with "This 7z can't be extracted while it downloads."
+  with nothing written, for the app to extract it afterwards. The download itself is unchanged: its ranges
+  still go in order, so a USB drive's exFAT never extends the file far ahead.
+- `network::fetch_range` makes one ranged GET outside the download queue.
+- A worker that dies while a 7z streams no longer ends the app: the PS5 host ignores SIGPIPE, as payloads do,
+  and the engine stops telling the worker about the download once a write to it fails, then fails the task
+  with "The 7z worker stopped before finishing." The worker claims a folder's whole LZMA dictionary, which
+  its decoders allocate however small the folder. A `<destination>.tail` left by an app closed mid-extraction
+  is removed when that destination is extracted again. `docs/NATIVE-API.md` documents `stream`, `tail`
+  and `Archives.streamsSevenZip`.
+
 ## Unreleased — certificates for old firmwares
 
 - Networking apps ship Mozilla's root certificates (curl's `cacert.pem`, pinned as `caBundle`). At start the

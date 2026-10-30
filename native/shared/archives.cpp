@@ -23,6 +23,7 @@
 #include <cstring>
 #include <dirent.h>
 #include <fcntl.h>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string_view>
@@ -489,11 +490,6 @@ struct MemoryHold {
   const bool room = hold_memory(true);
   ~MemoryHold() { hold_memory(false); }
 };
-// Whether the heap has room for an in-process extraction now, once the image caches have dropped.
-bool heap_room() {
-  const MemoryHold memory;
-  return memory.room;
-}
 archive* open_archive(Job& job, std::string& error, std::unique_ptr<Rar5PasswordReader>& decrypted) {
   const auto& request = job.request;
   use_utf8_names();
@@ -602,12 +598,18 @@ bool rar_volumes(const Request& request) {
     return std::any_of(rar_signatures.begin(), rar_signatures.end(), [&](std::string_view signature) { return bytes.starts_with(signature); });
   });
 }
-bool seven_zip_source(const Request& request) {
+bool seven_zip_file(const std::string& path) {
   char head[6] = {};
-  const int fd = open(request.sources.front().c_str(), O_RDONLY | O_NOFOLLOW);
+  const int fd = open(path.c_str(), O_RDONLY | O_NOFOLLOW);
   const auto count = fd < 0 ? -1 : read(fd, head, sizeof head);
   if (fd >= 0) close(fd);
   return count == sizeof head && !std::memcmp(head, "7z\xBC\xAF\x27\x1C", sizeof head);
+}
+bool seven_zip_source(const Request& request) { return seven_zip_file(request.sources.front()); }
+// A 7z still downloading to its one source: the partial file beside it holds the signature.
+bool seven_zip_stream(const Request& request) {
+  if (!request.stream || request.sources.size() != 1) return false;
+  return seven_zip_file(request.sources.front()) || seven_zip_file(request.sources.front() + ".part");
 }
 // Decoder threads: PS5 has 8 cores; the interface keeps two either way, and downloads (a streamed set's own
 // included) two more.
@@ -632,10 +634,19 @@ std::string rar_request(const Request& request, const std::string& staging) {
 // and the console froze. This stays under that with room for what the app and the worker hold besides,
 // and admits the 256 MiB LZMA2 dictionary repacks use.
 constexpr std::uint64_t seven_zip_worker_memory = 288ULL * 1024 * 1024;
-std::string seven_zip_request(const Request& request, const std::string& staging, std::uint64_t memory) {
-  std::string text = "7ZX1\nmemory " + std::to_string(memory) + "\nlimit " + std::to_string(request.max_bytes) + "\n";
+// What the worker's decoders may hold, the dictionary and the multithreaded LZMA2 decoder's blocks together:
+// with the worker's 32 MiB of buffers, the 384 MiB the probe saw handed over without a stall.
+constexpr std::uint64_t seven_zip_worker_cap = 352ULL * 1024 * 1024;
+// `tail` is a file holding the archive's bytes from `tail_offset` on, when its download has not reached them.
+std::string seven_zip_request(const Request& request, const std::string& staging, std::uint64_t memory, const std::string& tail = {},
+                              std::uint64_t tail_offset = 0) {
+  std::string text = "7ZX1\nmemory " + std::to_string(memory) + "\ncap " + std::to_string(seven_zip_worker_cap) + "\nthreads " +
+                     std::to_string(rar_threads(request)) + "\nlimit " + std::to_string(request.max_bytes) + "\n";
   for (auto extension : image_extensions) text += "flatten " + std::string(extension) + "\n";
-  text += "reserved .ps5-react-\ndest " + staging + "\n";
+  text += "reserved .ps5-react-\n";
+  if (request.stream) text += "wait 1\n";
+  if (!tail.empty()) text += "tail " + std::to_string(tail_offset) + " " + tail + "\n";
+  text += "dest " + staging + "\n";
   for (const auto& path : request.sources) text += "source " + path + "\n";
   return text + "end\n";
 }
@@ -667,7 +678,7 @@ std::string rar_file(Job& job, const std::string& staging, const std::string& re
 // Runs rar-extract on `request` (a RAR set's or a 7z's, `kind` naming which in traces and errors). False
 // when the worker could not be started, before anything was written.
 bool extract_worker(Job& job, const std::string& staging, Receipt& receipt, std::string& error, const std::string& request,
-                    const std::string& kind) {
+                    const std::string& kind, const std::function<bool(int)>& feed = {}) {
   const std::string name = (kind == "RAR" ? std::string("rar") : kind) + " worker";
   std::string unavailable;
   const int stream = start_rar_worker(request, unavailable);
@@ -688,6 +699,8 @@ bool extract_worker(Job& job, const std::string& staging, Receipt& receipt, std:
       cancel_sent = true;
       silent = 0;
     }
+    // A worker that no longer takes its input has died: the task fails, and it is cancelled rather than fed.
+    if (feed && !cancel_sent && !feed(stream) && error.empty()) error = "The " + kind + " worker stopped before finishing.";
     const auto count = read_rar_worker(stream, buffer.data(), buffer.size());
     if (!count) {
       exited = true;
@@ -738,9 +751,12 @@ bool extract_worker(Job& job, const std::string& staging, Receipt& receipt, std:
       const auto from = at + std::strlen(key) + 2;
       return timings.substr(from, timings.find(' ', from) - from);
     };
-    const auto summary = kind + " worker " + std::to_string(total >> 20) + "MiB " + std::to_string(job.snapshot.entries)
+    auto summary = kind + " worker " + std::to_string(total >> 20) + "MiB " + std::to_string(job.snapshot.entries)
         + " entries total=" + std::to_string(elapsed_us(started) / 1000) + "ms threads=" + field("threads") + " cores=" + field("cores")
         + " decode-cpu=" + field("cpu") + " write=" + field("write") + " fsync=" + field("fsync") + " waited=" + field("waited");
+    // A 7z's reader and LZMA2 block size, and the time spent waiting for its download.
+    if (kind == "7z")
+      summary += " decoder=" + field("decoder") + " block=" + field("block") + " download-wait=" + field("download-wait");
     trace("throughput", summary.c_str());
   }
   if (error.empty() && !job.cancelled && !succeeded)
@@ -754,6 +770,108 @@ bool extract_worker(Job& job, const std::string& staging, Receipt& receipt, std:
 // False when the worker could not be started, before anything was written: libarchive extracts instead.
 bool extract_rar(Job& job, const std::string& staging, Receipt& receipt, std::string& error) {
   return extract_worker(job, staging, receipt, error, rar_request(job.request, staging), "RAR");
+}
+// Tells the worker how much of a downloading 7z is on disk, a few times a second, and its size once the
+// download has published it.
+class DownloadFeed {
+public:
+  explicit DownloadFeed(std::string path) : path_(std::move(path)) {}
+  // False when the worker's input is gone.
+  bool operator()(int stream) {
+    const auto now = std::chrono::steady_clock::now();
+    if (done_ || now - last_ < std::chrono::milliseconds(100)) return true;
+    last_ = now;
+    std::uint64_t prefix = 0, total = 0;
+    std::string line;
+    struct stat st;
+    if (download_progress(path_, prefix, total)) {
+      line = "have " + std::to_string(prefix) + " " + std::to_string(total) + "\n";
+    } else if (!lstat(path_.c_str(), &st) && S_ISREG(st.st_mode)) {
+      line = "done " + std::to_string(st.st_size) + "\n";
+      done_ = true;
+    }
+    // With neither, the download stopped: the app cancels this extraction.
+    if (!line.empty() && line != sent_ && !tell_rar_worker(stream, line)) return false;
+    sent_ = line;
+    return true;
+  }
+
+private:
+  std::string path_, sent_;
+  std::chrono::steady_clock::time_point last_{};
+  bool done_ = false;
+};
+// A 7z number: its first byte's leading ones say how many bytes follow.
+bool seven_zip_number(const std::string& data, std::size_t& at, std::uint64_t& value) {
+  if (at >= data.size()) return false;
+  const unsigned first = static_cast<unsigned char>(data[at++]);
+  value = 0;
+  for (unsigned i = 0, mask = 0x80; i < 8; ++i, mask >>= 1) {
+    if (!(first & mask)) {
+      value |= std::uint64_t(first & (mask - 1)) << (8 * i);
+      return true;
+    }
+    if (at >= data.size()) return false;
+    value |= std::uint64_t(static_cast<unsigned char>(data[at++])) << (8 * i);
+  }
+  return true;
+}
+// Fetches the headers of a downloading 7z into `path`, from `offset`: its start header names where they
+// are, and an encoded header names the packed stream it decodes from, usually just before. A few ranged
+// requests of a few KiB. False (nothing to read there) when the download is past them already, its size is
+// not known yet or a request fails: the worker then reads them once the download gets there.
+bool fetch_tail(Job& job, const std::string& path, std::uint64_t& offset) {
+  const auto& request = job.request;
+  const auto& source = request.sources.front();
+  if (request.tail_url.empty()) return false;
+  std::uint64_t prefix = 0, total = 0;
+  for (unsigned tries = 0; (!total || prefix < 32) && tries < 240 && !job.cancelled; ++tries) {
+    if (!download_progress(source, prefix, total)) return false;
+    if (!total || prefix < 32) std::this_thread::sleep_for(std::chrono::milliseconds(250));
+  }
+  unsigned char start[32] = {};
+  const int fd = open(regular_file(source) ? source.c_str() : (source + ".part").c_str(), O_RDONLY | O_NOFOLLOW);
+  const bool read_start = fd >= 0 && pread(fd, start, sizeof start, 0) == sizeof start;
+  if (fd >= 0) close(fd);
+  if (!total || !read_start || std::memcmp(start, "7z\xBC\xAF\x27\x1C", 6)) return false;
+  const auto little = [&](unsigned at) {
+    std::uint64_t value = 0;
+    for (unsigned i = 0; i < 8; ++i) value |= std::uint64_t(start[at + i]) << (8 * i);
+    return value;
+  };
+  const std::uint64_t header = 32 + little(12), size = little(20);
+  if (!size || size > max_metadata_bytes || header > total || size > total - header || prefix >= header + size) return false;
+  std::string bytes, error;
+  if (job.cancelled || !fetch_range(request.tail_url, request.tail_headers, header, size, bytes, error, job.cancelled)) {
+    trace("7z headers not fetched", error.c_str());
+    return false;
+  }
+  offset = header;
+  // kEncodedHeader: kPackInfo, the packed stream's position and count, kSize and its size.
+  std::size_t at = 1;
+  std::uint64_t position = 0, streams = 0, packed = 0;
+  if (bytes[0] == 0x17 && bytes.size() > 1 && bytes[at++] == 0x06 && seven_zip_number(bytes, at, position) &&
+      seven_zip_number(bytes, at, streams) && streams && at < bytes.size() && bytes[at++] == 0x09 && seven_zip_number(bytes, at, packed) &&
+      32 + position < header && header - (32 + position) <= max_metadata_bytes && packed <= header - (32 + position) && prefix < header) {
+    // With room for the headers after it, so the two are not copied into a third string.
+    std::string packed;
+    packed.reserve(header - (32 + position) + bytes.size());
+    if (!fetch_range(request.tail_url, request.tail_headers, 32 + position, header - (32 + position), packed, error, job.cancelled)) {
+      trace("7z packed header not fetched", error.c_str());
+      return false;
+    }
+    offset = 32 + position;
+    packed += bytes;
+    bytes.swap(packed);
+  }
+  unlink(path.c_str());
+  if (!write_metadata(path.substr(0, path.rfind('/')), path.substr(path.rfind('/') + 1).c_str(), bytes)) {
+    unlink(path.c_str());
+    trace("7z headers not saved", path.c_str());
+    return false;
+  }
+  trace("7z headers fetched, bytes", std::to_string(bytes.size()).c_str());
+  return true;
 }
 std::string staging_path(const std::string& destination, unsigned attempt) {
   return destination + ".extracting" + (attempt ? "-" + std::to_string(attempt) : "");
@@ -774,6 +892,9 @@ void remove_leftover_staging(const Request& request, const std::string& identity
   struct stat st;
   if (!lstat(request.destination.c_str(), &st)) leftover(staging_path(request.destination, 0));
   for (unsigned attempt = 1; leftover(staging_path(request.destination, attempt)); attempt++) {}
+  // The headers a streamed 7z fetched, left when the app ended during its extraction.
+  const auto tail = request.destination + ".tail";
+  if (!lstat(tail.c_str(), &st) && S_ISREG(st.st_mode)) unlink(tail.c_str());
 }
 void remove_owned_staging(const std::string& staging, const struct stat& owned) {
   struct stat current;
@@ -792,7 +913,10 @@ void run(const std::shared_ptr<Job>& pointer) {
   const std::string staging = staging_path(request.destination, attempt);
   struct stat st;
   const auto identity = request.stream ? stream_identity(request) : input_identity(request);
-  if (identity.empty() || !regular_file(request.sources.front())) {
+  // A downloading 7z is still in its partial file.
+  const bool seven_zip_streamed = seven_zip_stream(request);
+  const bool source = regular_file(request.sources.front()) || (seven_zip_streamed && regular_file(request.sources.front() + ".part"));
+  if (identity.empty() || !source) {
     fail(job, "Archive source is missing or not a regular file.");
     return;
   }
@@ -810,10 +934,14 @@ void run(const std::shared_ptr<Job>& pointer) {
   // A streamed set is checked on its first volume, as a partial download is; the worker refuses any later
   // header over its limits. Its paths go to the worker's line protocol.
   const auto streamed = [&] {
-    const auto found = inspect({request.sources.front()});
     const bool lines = request.destination.find('\n') == std::string::npos &&
         std::none_of(request.sources.begin(), request.sources.end(), [](const std::string& path) { return path.find('\n') != std::string::npos; });
-    return found.kind != "rar" || !lines ? std::string("Only a RAR set can be extracted while it downloads.") : found.refusal;
+    // A 7z's headers are at its end: the worker checks them once it has them.
+    // libarchive reads a 7z with a password, and only once complete.
+    if (seven_zip_streamed && !request.password.empty()) return std::string("This 7z can't be extracted while it downloads.");
+    if (seven_zip_streamed) return lines ? std::string() : std::string("Only a RAR set or a 7z can be extracted while it downloads.");
+    const auto found = inspect({request.sources.front()});
+    return found.kind != "rar" || !lines ? std::string("Only a RAR set or a 7z can be extracted while it downloads.") : found.refusal;
   };
   std::uint64_t seven_zip_memory = 0;
   const auto refusal = request.stream ? streamed() : preflight(request.sources, seven_zip_memory);
@@ -891,20 +1019,30 @@ void run(const std::shared_ptr<Job>& pointer) {
     job.snapshot.state = "extracting";
     job.snapshot.phase = "extracting";
   }
-  // RAR sets go to rar-extract; everything else, and RAR when the worker cannot start, to libarchive. Only
-  // the worker waits for volumes: a streamed set it cannot take fails with nothing written, and the app
-  // extracts it once every volume is there.
-  if (request.stream) {
+  // RAR sets and 7z archives go to rar-extract, which decodes them on several cores; everything else, and
+  // either when the worker cannot start, to libarchive. Only the worker waits for a download: a streamed
+  // archive it cannot take fails with nothing written, and the app extracts it once the download is done.
+  if (seven_zip_streamed) {
+    const std::string tail = request.destination + ".tail";
+    std::uint64_t tail_offset = 0;
+    const bool fetched = fetch_tail(job, tail, tail_offset);
+    DownloadFeed feed(request.sources.front());
+    if (!extract_worker(job, staging, receipt, error, seven_zip_request(request, staging, 1, fetched ? tail : "", tail_offset), "7z",
+                        std::ref(feed)) && error.empty())
+      error = "Extracting while downloading needs the 7z worker.";
+    unlink(tail.c_str());
+  } else if (request.stream) {
     if (!extract_rar(job, staging, receipt, error) && error.empty()) error = "Extracting while downloading needs the RAR worker.";
   } else if (seven_zip_worker) {
     if (!extract_worker(job, staging, receipt, error, seven_zip_request(request, staging, seven_zip_memory), "7z") && error.empty())
       error = "This archive needs the payload loader to extract: none answered on port 9021.";
   } else if (rar_volumes(request) && extract_rar(job, staging, receipt, error)) {
-  } else if (seven_zip_source(request) && lines && !heap_room() &&
+  } else if (seven_zip_source(request) && lines && request.password.empty() &&
              extract_worker(job, staging, receipt, error,
                             seven_zip_request(request, staging, std::max<std::uint64_t>(seven_zip_memory, 1ULL << 20)), "7z")) {
-    // A 7z the heap has no room for now (a large catalog's live heap) goes to rar-extract as one too big for
-    // the heap does; libarchive tries it only when the worker cannot start.
+    // Every 7z goes to rar-extract: LZMA2 decodes there on several cores, and the heap keeps its room.
+    // libarchive tries it here only when the worker cannot start, and takes one with a password, which the
+    // worker does not read.
   } else {
     const MemoryHold memory;
     std::unique_ptr<Rar5PasswordReader> decrypted;

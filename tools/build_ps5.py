@@ -199,8 +199,8 @@ def main():
     run([sdk / "bin/prospero-clang", "-std=gnu11", "-O2", "-Wall", "-Wextra", "-Werror", "-o", installer,
          ROOT / "native/ps5/payloads/pkg_installer.c", "-lkernel_sys", "-lSceUserService"],
         env=env, log=BUILD / "pkg-installer.log")
-    # RAR sets extract in a payload of their own: UnRAR's license keeps its code out of this GPL app. So
-    # does a 7z that needs more memory than the app's heap gives, with the engine's own libarchive.
+    # RAR sets extract in a payload of their own: UnRAR's license keeps its code out of this GPL app. So does
+    # every 7z, with the LZMA SDK on several cores (libarchive for the folders it does not decode).
     rar_extract = build_rar_worker(BUILD / "rar-extract.elf", [sdk / "bin/prospero-clang++"],
                                    ["-I", archive_ports / "include"], [*archive_libs, builtins], env)
     # Opens the app again after it closes, which the app itself cannot do.
@@ -272,6 +272,7 @@ def main():
         for name in ("lapy.elf", "lapy-manifest.json"):
             (app / name).unlink(missing_ok=True)
     shutil.copy2(unrar_source() / "license.txt", notices / "unRAR-license.txt")
+    shutil.copy2(ROOT / "licenses/lzma-sdk-NOTICE.txt", notices / "lzma-sdk-NOTICE.txt")
     stb = (stb_image() / "stb_image.h").read_text()
     (notices / "stb_image-LICENSE").write_text(stb[stb.index("This software is available under 2 licenses"):])
     copy_notices(compatibility_client, notices / "networking")
