@@ -438,9 +438,11 @@ struct Plan {
 };
 // A thread holds a block's output and its packed input (measured at 1.6 times the block for a 128 MiB one).
 // The dictionary stays reserved beside them: the decoder falls back to it for a block larger than planned.
+// LzmaDec_Allocate and Lzma2Dec_Allocate take the whole dictionary however small the folder, so it is
+// claimed whole.
 Plan plan(Input& input, const Folder& folder, unsigned threads, std::uint64_t room) {
   Plan result;
-  result.memory = std::min(folder_dictionary(folder), folder.unpack_size + (1 << 20));
+  result.memory = folder_dictionary(folder);
   if (folder.method != method_lzma2 || threads < 2 || room <= result.memory) return result;
   const std::uint64_t left = room - result.memory;
   const std::uint64_t block = first_block(input, folder, left / 2);
