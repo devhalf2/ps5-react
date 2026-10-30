@@ -241,7 +241,10 @@ def main():
    return out
   zip=root/"fixture.zip"
   with zipfile.ZipFile(zip,"w",compression=zipfile.ZIP_DEFLATED) as z:z.writestr("nested/game.ffpfsc",DATA)
+  # The headers a streamed 7z fetched for this destination, left by an app that ended, are removed.
+  (root/"zip.tail").write_bytes(b"7z headers")
   assert run("zip",[zip])[0]=="completed"
+  assert not (root/"zip.tail").exists()
   assert (root/"zip/game.ffpfsc").read_bytes()==DATA
   # The game runs as another user than the app: an extracted tree only its owner reads freezes the console
   # at launch, and an eboot.bin without execute permission fails with CE-107750-0. Folders, the extraction

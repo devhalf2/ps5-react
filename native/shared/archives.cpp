@@ -853,13 +853,16 @@ bool fetch_tail(Job& job, const std::string& path, std::uint64_t& offset) {
   if (bytes[0] == 0x17 && bytes.size() > 1 && bytes[at++] == 0x06 && seven_zip_number(bytes, at, position) &&
       seven_zip_number(bytes, at, streams) && streams && at < bytes.size() && bytes[at++] == 0x09 && seven_zip_number(bytes, at, packed) &&
       32 + position < header && header - (32 + position) <= max_metadata_bytes && packed <= header - (32 + position) && prefix < header) {
-    std::string before;
-    if (!fetch_range(request.tail_url, request.tail_headers, 32 + position, header - (32 + position), before, error, job.cancelled)) {
+    // With room for the headers after it, so the two are not copied into a third string.
+    std::string packed;
+    packed.reserve(header - (32 + position) + bytes.size());
+    if (!fetch_range(request.tail_url, request.tail_headers, 32 + position, header - (32 + position), packed, error, job.cancelled)) {
       trace("7z packed header not fetched", error.c_str());
       return false;
     }
     offset = 32 + position;
-    bytes = before + bytes;
+    packed += bytes;
+    bytes.swap(packed);
   }
   unlink(path.c_str());
   if (!write_metadata(path.substr(0, path.rfind('/')), path.substr(path.rfind('/') + 1).c_str(), bytes)) {
@@ -889,6 +892,9 @@ void remove_leftover_staging(const Request& request, const std::string& identity
   struct stat st;
   if (!lstat(request.destination.c_str(), &st)) leftover(staging_path(request.destination, 0));
   for (unsigned attempt = 1; leftover(staging_path(request.destination, attempt)); attempt++) {}
+  // The headers a streamed 7z fetched, left when the app ended during its extraction.
+  const auto tail = request.destination + ".tail";
+  if (!lstat(tail.c_str(), &st) && S_ISREG(st.st_mode)) unlink(tail.c_str());
 }
 void remove_owned_staging(const std::string& staging, const struct stat& owned) {
   struct stat current;

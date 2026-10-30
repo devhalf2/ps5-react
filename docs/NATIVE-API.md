@@ -441,9 +441,13 @@ try { const {artifacts} = await task.done; console.log(artifacts); }
 finally { unsubscribe(); }
 ```
 
-`cancel()` requests cancellation. ZIP, TAR, 7z and RAR/RAR5 use libarchive in a
-worker thread. Supply ordered archive volumes; no full joined copy enters JS or
-RAM. One extraction may run at a time. Source files are preserved. Output paths,
+`cancel()` requests cancellation. ZIP and TAR use libarchive in a worker thread.
+RAR sets and every 7z without a password go to `rar-extract`, a program of its
+own (started through the payload loader on the console, a child process on the
+desktop): it decodes LZMA2 on several cores with the console's memory rather
+than the title's heap. A 7z with a password, and either kind when the worker
+cannot start, use libarchive in the app. Supply ordered archive volumes; no full
+joined copy enters JS or RAM. One extraction may run at a time. Source files are preserved. Output paths,
 links, entry counts and byte budgets are validated. Extraction publishes a staged
 directory only after successful reading and SHA-256 output receipts. A matching
 published directory is reverified; matching interrupted staging is restarted.
@@ -476,10 +480,9 @@ libarchive's supported limit fail explicitly. Before extracting, the headers are
 read to refuse archives whose declared decoder windows (7z LZMA/LZMA2/PPMd/zstd
 and BCJ2 buffers, RAR5 windows, RAR PPMd, ZIP LZMA/XZ/zstd/PPMd, and an outer
 xz/zstd/lzip/lzma layer) exceed 64 MiB, since libarchive has no memory limit
-and the title's heap is fixed. That budget assumes nothing else large runs during extraction: don't
-extract while downloading. A 7z refused for that alone, whose largest folder declares at most 288 MiB
-(the 256 MiB LZMA2 dictionary repacks use), is extracted by `rar-extract` instead, in a process of its
-own started through the payload loader, with the console's memory rather than the title's heap. It first
+and the title's heap is fixed. That budget assumes nothing else large runs during extraction. A 7z
+refused for that alone, whose largest folder declares at most 288 MiB (the 256 MiB LZMA2 dictionary
+repacks use), is extracted by `rar-extract`, with the console's memory rather than the title's heap. It first
 takes that memory and writes to every page; when the console needs over a second to hand it over (it is
 freeing memory from everything else: a probe froze a console from 512 MiB on), it fails with "The console
 has too little free memory to extract this archive now. Close other apps and retry." before decoding.
@@ -487,6 +490,22 @@ Without a payload loader it fails with "This archive needs the payload loader to
 on port 9021." Over 288 MiB the memory refusal stands. Self-extracting executables are refused. This API does not install PKGs or
 register games. Desktop extraction and successful PS5 linking are not console
 execution evidence.
+
+`stream: true` starts an extraction before its download ends (`Archives.streams`
+for RAR sets, `Archives.streamsSevenZip` for a 7z). For a RAR set only the first
+volume must exist; each next one is read once a file appears under its final
+name, so write volumes elsewhere and rename them. A 7z must be the one source a
+`Downloads.enqueue` task is still writing (to `<source>.part`): `rar-extract`
+decodes each folder as the download's contiguous prefix reaches it and ends once
+the download is published under its final name. A 7z keeps its headers at its
+end; with `tail: {url, headers}`, what the download requests, the engine fetches
+them ahead with ranged requests of a few KiB into `<destination>.tail`, removed
+when the extraction ends (or, after the app was closed during one, when the same
+destination is extracted again). Without `tail` they are read once the download
+reaches them. A streamed 7z with a password, or one only libarchive reads (branch
+filters, PPMd, BCJ2, zstd), fails with "This 7z can't be extracted while it
+downloads." and nothing written: extract it once the download completes. Both
+need the worker: without one the task fails rather than extracting in the app.
 
 `Archives.inspect(sources)` returns `{kind, refusal}` synchronously. The headers
 are read on a worker thread and the call waits at most about 25 ms: a download

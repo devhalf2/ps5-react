@@ -22,6 +22,12 @@
   with nothing written, for the app to extract it afterwards. The download itself is unchanged: its ranges
   still go in order, so a USB drive's exFAT never extends the file far ahead.
 - `network::fetch_range` makes one ranged GET outside the download queue.
+- A worker that dies while a 7z streams no longer ends the app: the PS5 host ignores SIGPIPE, as payloads do,
+  and the engine stops telling the worker about the download once a write to it fails, then fails the task
+  with "The 7z worker stopped before finishing." The worker claims a folder's whole LZMA dictionary, which
+  its decoders allocate however small the folder. A `<destination>.tail` left by an app closed mid-extraction
+  is removed when that destination is extracted again. `docs/NATIVE-API.md` documents `stream`, `tail`
+  and `Archives.streamsSevenZip`.
 
 ## Unreleased — certificates for old firmwares
 
