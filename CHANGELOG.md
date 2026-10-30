@@ -38,6 +38,16 @@
   copy after checking that OpenSSL loads every certificate. Verified only by the build so far; the merge
   runs on a console.
 
+## Unreleased — PS5 packages
+
+- A PS5 package (`\x7FFIH`) is a package like a PS4 one (`\x7FCNT`): extraction lists it as an artifact,
+  `archives.inspect` names an untyped one `pkg`, and `pkg-installer.elf` takes it. Before, only `\x7FCNT`
+  counted, so a PS5 `.pkg` was refused with "The file is not a PKG." or left out of an extraction's
+  artifacts. The installer reads a PS5 package's content ID from the PS4-style header at the 64-bit offset
+  at 0x58 (checked on 16 PS5 packages from archive.org: 0x80000, 0xA0000, or near the end of an 87 GB one)
+  and fails with "The PS5 package is incomplete." when the file ends before it. The install call is the
+  one PS4 packages use; no PS5 package has been installed through it on a console yet.
+
 ## Unreleased — downloads and extraction from the Overdrive fork
 
 - A paused download resumes after a restart from a USB drive. The checkpoint identity no longer hashes the

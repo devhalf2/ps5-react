@@ -272,7 +272,8 @@ def main():
   open_to_all(root/"tar-marked")
   # Packages are told by their PKG signature, not their name: a file named .pkg that is something else is no
   # artifact, a real one is whatever the case of its extension, through the ring, inline, rar-extract and recovery.
-  PKG=b"\x7fCNT"+DATA
+  # A PS4 package starts with \x7FCNT, a PS5 one with \x7FFIH.
+  PKG=b"\x7fCNT"+DATA;PKG5=b"\x7fFIH"+DATA
   def artifacts(name,parts,**env):
    result=subprocess.run([str(binary),str(root/name),str(16<<20),*map(str,parts)],capture_output=True,text=True,timeout=20,
     env={**os.environ,"ARCHIVE_ARTIFACTS":"1",**env})
@@ -282,11 +283,12 @@ def main():
   with zipfile.ZipFile(packages,"w") as z:
    z.writestr("game.pkg",PKG);z.writestr("update/GAME-UPDATE.PKG",PKG);z.writestr("fake.pkg",zip.read_bytes())
    z.writestr("tiny.fpkg",b"\x7fC");z.writestr("readme.txt",PKG);z.writestr("nested/game.ffpfsc",DATA)
-  expected=["game.ffpfsc","game.pkg","update/GAME-UPDATE.PKG"]
+   z.writestr("ps5/PPSA02154.pkg",PKG5);z.writestr("odd.pkg",b"\x7fFIX"+DATA)
+  expected=["game.ffpfsc","game.pkg","ps5/PPSA02154.pkg","update/GAME-UPDATE.PKG"]
   for name,env in (("packages-ring",{}),("packages-inline",{"ARCHIVE_PIPELINE_BYTES":"0"})):
    assert artifacts(name,[packages],**env)==expected
    assert artifacts(name,[packages],**env)==expected
-  for name,blob,found in (("rar-fake-pkg",DATA,[]),("rar-real-pkg",PKG,["game.pkg"])):
+  for name,blob,found in (("rar-fake-pkg",DATA,[]),("rar-real-pkg",PKG,["game.pkg"]),("rar-ps5-pkg",PKG5,["game.pkg"])):
    p=root/(name+".rar");p.write_bytes(plain_rar5("game.pkg",blob))
    assert artifacts(name,[p])==found and artifacts(name,[p])==found
   # A heap without room for an in-process extraction fails it cleanly, with nothing written.
@@ -720,6 +722,8 @@ def main():
   assert inspect(gz)==["tar.gz",""]
   assert inspect(partial("huge.tar.xz.part",(root/"huge.tar.xz").read_bytes(),4096))==["tar.xz",TOO_BIG]
   assert inspect(partial("game.pkg.part",b"\x7fCNT"+bytes(64),68))==["pkg",""]
+  assert inspect(partial("ps5.pkg.part",b"\x7fFIH"+bytes(64),68))==["pkg",""]
+  assert inspect(partial("odd.pkg.part",b"\x7fFIX"+bytes(64),68))==["",""]
   assert inspect(partial("game.exfat",b"\xeb\x76\x90EXFAT   "+bytes(500),512))==["exfat",""]
   ufs=bytearray(70000);ufs[65536+1372:65536+1376]=struct.pack("<I",0x19540119)
   assert inspect(partial("game.ffpkg",bytes(ufs),len(ufs)))==["ffpkg",""]
