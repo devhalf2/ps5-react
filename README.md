@@ -171,7 +171,12 @@ with a folder in `apps/`. See [external-app editor setup](docs/EXTERNAL-APPS.md)
 PNG files in the app's `sce_sys/` go into the title's `sce_sys/`: `icon0.png`
 (512×512) is the home-screen icon, `pic0.png` (1920×1080) its background and
 `pic1.png` (1920×1080) the splash shown until the first frame. Without an
-`icon0.png` the build draws a placeholder icon.
+`icon0.png` the build draws a placeholder icon. The home screen reads a title's
+backgrounds from `pic0.dds` and `pic1.dds`, which the build copies too:
+`npm run build` requires both or neither, each 3840×2160 BC7 (`BC7_UNORM`,
+DX10 header) with one mip level. A loader may copy the art only when it first
+registers the title; ShadowMountPlus does, so an installed title shows new art
+after its tile is deleted and registered again.
 
 ### Application configuration
 

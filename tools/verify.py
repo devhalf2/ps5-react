@@ -13,6 +13,23 @@ import sys
 from common import ROOT, digest
 
 
+def check_backgrounds(sce_sys):
+    """The home screen's backgrounds, when the app has them: both, each a 3840x2160 BC7_UNORM DX10 DDS
+    with one mip, the layout homebrew that shows its art there ships."""
+    backgrounds = [sce_sys / name for name in ("pic0.dds", "pic1.dds")]
+    present = [path.exists() for path in backgrounds]
+    assert all(present) or not any(present), "pic0.dds and pic1.dds go together"
+    for path in backgrounds:
+        if not path.exists(): continue
+        data = path.read_bytes()
+        assert len(data) >= 148 and data[:4] == b"DDS " and data[84:88] == b"DX10", path.name
+        height, width = struct.unpack_from("<II", data, 12)
+        assert (width, height) == (3840, 2160) and struct.unpack_from("<I", data, 28)[0] == 1, path.name
+        dxgi, dimension, _, count, _ = struct.unpack_from("<5I", data, 128)
+        assert (dxgi, dimension, count) == (98, 3, 1), path.name  # BC7_UNORM, one 2D texture
+        assert len(data) == 148 + width * height, path.name
+
+
 def main():
     TITLE = sys.argv[1] if len(sys.argv) > 1 else "PPSA99053"
     receipt_path = ROOT / "dist" / (TITLE + ".receipt.json")
@@ -35,6 +52,7 @@ def main():
     with Image.open(app / "sce_sys/icon0.png") as image:
         assert image.size == (512, 512)
         image.verify()
+    check_backgrounds(app / "sce_sys")
 
     data = (BUILD / "eboot.elf").read_bytes()
     assert data[:7] == b"\x7fELF\x02\x01\x01"
@@ -66,7 +84,7 @@ def main():
         assert package.testzip() is None
         for name, checksum in receipt["files"].items():
             assert package.read(TITLE + "/" + name) == (app / name).read_bytes(), name
-    print("PASS: title metadata, icon, PS5 ELF/segments, SELF integrity, hashes and ZIP")
+    print("PASS: title metadata, icon, backgrounds, PS5 ELF/segments, SELF integrity, hashes and ZIP")
 
 
 if __name__ == "__main__":
