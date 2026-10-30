@@ -678,7 +678,7 @@ std::string rar_file(Job& job, const std::string& staging, const std::string& re
 // Runs rar-extract on `request` (a RAR set's or a 7z's, `kind` naming which in traces and errors). False
 // when the worker could not be started, before anything was written.
 bool extract_worker(Job& job, const std::string& staging, Receipt& receipt, std::string& error, const std::string& request,
-                    const std::string& kind, const std::function<void(int)>& feed = {}) {
+                    const std::string& kind, const std::function<bool(int)>& feed = {}) {
   const std::string name = (kind == "RAR" ? std::string("rar") : kind) + " worker";
   std::string unavailable;
   const int stream = start_rar_worker(request, unavailable);
@@ -699,7 +699,8 @@ bool extract_worker(Job& job, const std::string& staging, Receipt& receipt, std:
       cancel_sent = true;
       silent = 0;
     }
-    if (feed && !cancel_sent) feed(stream);
+    // A worker that no longer takes its input has died: the task fails, and it is cancelled rather than fed.
+    if (feed && !cancel_sent && !feed(stream) && error.empty()) error = "The " + kind + " worker stopped before finishing.";
     const auto count = read_rar_worker(stream, buffer.data(), buffer.size());
     if (!count) {
       exited = true;
@@ -775,9 +776,10 @@ bool extract_rar(Job& job, const std::string& staging, Receipt& receipt, std::st
 class DownloadFeed {
 public:
   explicit DownloadFeed(std::string path) : path_(std::move(path)) {}
-  void operator()(int stream) {
+  // False when the worker's input is gone.
+  bool operator()(int stream) {
     const auto now = std::chrono::steady_clock::now();
-    if (done_ || now - last_ < std::chrono::milliseconds(100)) return;
+    if (done_ || now - last_ < std::chrono::milliseconds(100)) return true;
     last_ = now;
     std::uint64_t prefix = 0, total = 0;
     std::string line;
@@ -789,8 +791,9 @@ public:
       done_ = true;
     }
     // With neither, the download stopped: the app cancels this extraction.
-    if (!line.empty() && line != sent_) tell_rar_worker(stream, line);
+    if (!line.empty() && line != sent_ && !tell_rar_worker(stream, line)) return false;
     sent_ = line;
+    return true;
   }
 
 private:

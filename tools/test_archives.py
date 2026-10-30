@@ -728,5 +728,19 @@ def main():
   assert soon==["||pending","rar||done","rar||pending"],soon
   assert subprocess.check_output([str(binary),"inspect-soon","0",str(rar_parts[0])],text=True,timeout=20).splitlines()==["rar||done"]*3
   seven_zip_sdk(root,binary)
+  # A worker that dies on the console while a 7z downloads leaves a reset socket: writes fail, reads find
+  # nothing. The download is no longer fed to it (each write would raise SIGPIPE there) and the task fails.
+  dead=root/"dead-worker-client"
+  subprocess.run(["clang++","-std=c++20","-O2","-Wall","-Wextra","-Werror","-pthread","-I",str(ROOT/"native/shared"),"-I",prefix+"/include","-I",xz+"/include","-I",crypto+"/include",*map(str,sources[:-1]),str(ROOT/"tools/tests/dead_worker_host.cpp"),"-L",prefix+"/lib","-L",xz+"/lib","-L",crypto+"/lib","-larchive","-llzma","-lcrypto","-lz","-o",str(dead)],check=True)
+  growing=root/"downloads/dead.7z";growing.parent.mkdir(exist_ok=True)
+  Path(str(growing)+".part").write_bytes(b"7z\xbc\xaf\x27\x1c"+bytes(26));avail=Path(str(growing)+".avail");avail.write_text("32 1048576")
+  process=subprocess.Popen([str(dead),str(root/"dead"),str(1<<30),str(growing),"--stream"],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+  for at in range(64,1<<20,4096):
+   if process.poll() is not None:break
+   avail.write_text(f"{at} 1048576");time.sleep(0.01)
+  out,writes=process.communicate(timeout=20)
+  assert out.splitlines()[::2]==["failed","The 7z worker stopped before finishing."],(out,writes)
+  assert [line.split(" ")[:2] for line in writes.splitlines()]==[["write","have"],["write","cancel"]],writes
+  assert not (root/"dead").exists()
   print("PASS: header inspection of partial downloads, off the render thread; ZIP/TAR/7z/multivolume RAR, decoder memory refusal, interrupted staging, verified recovery, missing parts and unsafe archive rejection")
 if __name__=="__main__":main()

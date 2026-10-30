@@ -60,7 +60,8 @@ int start_rar_worker(const std::string& request, std::string& error);
 // Bytes of its output; 0 at its end, -1 when none came within about a quarter second or on an error.
 long read_rar_worker(int stream, char* data, std::size_t size);
 void cancel_rar_worker(int stream);
-// Writes one line to the worker's input ("have ..." and "done ..." for a downloading 7z).
-void tell_rar_worker(int stream, const std::string& line);
+// Writes one line to the worker's input ("have ..." and "done ..." for a downloading 7z); false when the
+// worker's input is gone.
+bool tell_rar_worker(int stream, const std::string& line);
 void close_rar_worker(int stream);
 }

@@ -94,7 +94,7 @@ long archives::read_rar_worker(int stream, char* data, std::size_t size) {
 }
 
 void archives::cancel_rar_worker(int stream) { send_all(stream, "cancel\n", 7); }
-void archives::tell_rar_worker(int stream, const std::string& line) { send_all(stream, line.data(), line.size()); }
+bool archives::tell_rar_worker(int stream, const std::string& line) { return send_all(stream, line.data(), line.size()); }
 
 // The worker stops when its input closes. One stuck in a write past five seconds is killed, so it
 // cannot outlive the extraction whose staging is about to be removed.
