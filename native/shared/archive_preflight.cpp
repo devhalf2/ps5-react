@@ -730,7 +730,7 @@ Inspection inspect(const std::vector<std::string>& sources) {
   if (starts_with(magic, "\xFD" "7zXZ")) return {"tar.xz", fits(xz_window(in, 0))};
   if (starts_with(magic, "\x28\xB5\x2F\xFD")) return {"tar.zst", fits(zstd_window(in, 0))};
   if (std::string_view(reinterpret_cast<const char*>(ustar.data()), 5) == "ustar") return {"tar", {}};
-  if (starts_with(magic, "\x7F" "CNT")) return {"pkg", {}};
+  if (starts_with(magic, "\x7F" "CNT") || starts_with(magic, "\x7F" "FIH")) return {"pkg", {}};
   if (starts_with(magic, "PFSC")) return {"ffpfsc", {}};
   if (little_endian(magic.data(), 8) == 1) {
     std::array<unsigned char, 8> pfs{};

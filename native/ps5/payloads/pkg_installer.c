@@ -94,13 +94,22 @@ int main(void) {
       !read_line(name, sizeof name)) return 1;
   if (!allowed(path)) return fail(0, "The package path is not allowed.");
 
-  // A PKG starts with \x7FCNT and names its content ID at 0x40.
-  char header[0x40 + 36 + 1] = {0};
+  // A PS4 PKG starts with \x7FCNT and names its content ID at 0x40. A PS5 PKG starts with \x7FFIH and keeps
+  // such a header at the offset its 64-bit little-endian field at 0x58 gives (0x80000 in most, the end of
+  // some); a PS5 PKG cut short of that header is incomplete.
+  char header[0x40 + 36];
   const int file = open(path, O_RDONLY);
   if (file < 0) return fail(0, "The package could not be opened.");
-  const ssize_t got = read(file, header, sizeof header - 1);
+  ssize_t got = pread(file, header, sizeof header, 0);
+  const int ps5 = got == (ssize_t)sizeof header && !memcmp(header, "\x7F" "FIH", 4);
+  if (ps5) {
+    uint64_t offset;
+    memcpy(&offset, header + 0x58, sizeof offset);
+    got = offset <= INT64_MAX ? pread(file, header, sizeof header, (off_t)offset) : -1;
+  }
   close(file);
-  if (got != (ssize_t)sizeof header - 1 || memcmp(header, "\x7F" "CNT", 4)) return fail(0, "The file is not a PKG.");
+  if (got != (ssize_t)sizeof header || memcmp(header, "\x7F" "CNT", 4))
+    return fail(0, ps5 ? "The PS5 package is incomplete." : "The file is not a PKG.");
   char content_id[37];
   memcpy(content_id, header + 0x40, 36);
   content_id[36] = 0;

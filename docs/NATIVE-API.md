@@ -414,8 +414,14 @@ try { await task.done; } finally { unsubscribe(); }
 ```
 
 Installs a `.pkg` or `.fpkg` under `/data`, `/mnt/usb*` or `/mnt/ext*` through
-the console's install service (`sceAppInstUtilInstallByPackage`), PS4 and PS5
-packages alike. An app may not call that service, so each install sends
+the console's install service (`sceAppInstUtilInstallByPackage`). It takes a PS4
+package (`\x7FCNT`, content ID at 0x40) or a PS5 one (`\x7FFIH`, whose PS4-style
+header sits at the 64-bit little-endian offset at 0x58 and names the content ID
+the same way); anything else, or a PS5 package cut short of that header, fails
+before the console sees it. Only a PS4 fake package is confirmed on a console
+(`docs/HARDWARE.md`); PS5 packages go through the same call untested, and a
+retail one (byte 5 of the header 0x80) is encrypted for a licence the console
+must hold. An app may not call that service, so each install sends
 `pkg-installer.elf`, built from `native/ps5/payloads/pkg_installer.c` and
 shipped in the app folder, to the payload loader on `127.0.0.1:9021`; a jailbroken
 console without that loader fails with an error naming the port. The snapshot
@@ -450,7 +456,7 @@ published directory is reverified; matching interrupted staging is restarted.
 Unowned destinations/staging are preserved. Image artifacts are flattened to the
 output root for ShadowMount scan depth; duplicate filenames fail without overwrite.
 `artifacts` lists the images (by extension) and the packages: files named `.pkg`
-or `.fpkg`, in any case, that start with the PKG signature (`\x7FCNT`); a file
+or `.fpkg`, in any case, that start with a PKG signature (`\x7FCNT` or `\x7FFIH`); a file
 so named that is something else is left out. The receipt is streamed to disk a
 line per file, so its size does not limit the number of files (an archive may
 still hold at most 100,000 entries). Extracted folders are mode 0755, `eboot.bin` and
@@ -495,7 +501,7 @@ running, the result also has `pending: true` and carries the previous answer for
 the same sources (empty strings when there is none); the read finishes in the
 background and the next call with those sources returns it. Call again later
 rather than treating a pending empty `kind` as an answer. `kind` names the leading bytes: `rar`, `7z`, `zip`, `tar`,
-`tar.gz`, `tar.bz2`, `tar.xz`, `tar.zst`, `pkg` (`\x7FCNT`), `exfat`, `ffpkg` (a
+`tar.gz`, `tar.bz2`, `tar.xz`, `tar.zst`, `pkg` (`\x7FCNT` or `\x7FFIH`), `exfat`, `ffpkg` (a
 UFS2 superblock), `ffpfs`, `ffpfsc`, or `''`. For an archive, `refusal` is the
 decoder-memory message above when the headers read so far already declare a
 window over 64 MiB: an xz/zstd first block, or a RAR's file headers. A RAR's

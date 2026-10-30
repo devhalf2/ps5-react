@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased — PS5 packages
+
+- A PS5 package (`\x7FFIH`) is a package like a PS4 one (`\x7FCNT`): extraction lists it as an artifact,
+  `archives.inspect` names an untyped one `pkg`, and `pkg-installer.elf` takes it. Before, only `\x7FCNT`
+  counted, so a PS5 `.pkg` was refused with "The file is not a PKG." or left out of an extraction's
+  artifacts. The installer reads a PS5 package's content ID from the PS4-style header at the 64-bit offset
+  at 0x58 (checked on 16 PS5 packages from archive.org: 0x80000, 0xA0000, or near the end of an 87 GB one)
+  and fails with "The PS5 package is incomplete." when the file ends before it. The install call is the
+  one PS4 packages use; no PS5 package has been installed through it on a console yet.
+
 ## Unreleased — certificates for old firmwares
 
 - Networking apps ship Mozilla's root certificates (curl's `cacert.pem`, pinned as `caBundle`). At start the

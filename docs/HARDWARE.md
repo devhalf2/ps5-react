@@ -112,6 +112,12 @@ at 16 s. A first build that imported `libSceAppInstUtil` never reached `main`; t
 library is loaded by path. The in-app route (engine to loader on 127.0.0.1) is
 recorded separately once tested.
 
+No PS5 package (`\x7FFIH`) has been installed through `pkg-installer.elf` yet.
+Its header handling (content ID from the embedded `\x7FCNT` header at the offset
+stored at 0x58) was checked only on a Mac, against the first bytes of real PS5
+packages; whether the console's install service accepts them, on which firmware
+and with which kernel patches, is unconfirmed.
+
 ## Pandora 0.3.0 tester log — 2026-10-20
 
 Pandora 0.3.0 (`PPSA99060`, game-store app, released engine before the tester

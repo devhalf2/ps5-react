@@ -91,8 +91,9 @@ bool image(const std::string& path) { return has_extension(path, image_extension
 bool package_name(const std::string& path) { return has_extension(lower(path), package_extensions); }
 // Images and files named as packages. A package is only offered once package() reads its signature.
 bool installable(const std::string& path) { return image(path) || package_name(path); }
-// True when `file` starts with the PKG signature the package installer takes. A file named .pkg that is
-// something else (a nested archive, a placeholder, a part of a split package) is not offered for install.
+// True when `file` starts with a PKG signature the package installer takes: \x7FCNT (PS4) or \x7FFIH (PS5).
+// A file named .pkg that is something else (a nested archive, a placeholder, a part of a split package) is
+// not offered for install.
 // False with `error` when the file cannot be read.
 bool package(const std::string& file, std::string& error) {
   const int fd = open(file.c_str(), O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
@@ -116,7 +117,8 @@ bool package(const std::string& file, std::string& error) {
     count += bytes;
   }
   close(fd);
-  return count == magic.size() && !std::memcmp(magic.data(), "\x7F" "CNT", magic.size());
+  return count == magic.size() &&
+    (!std::memcmp(magic.data(), "\x7F" "CNT", magic.size()) || !std::memcmp(magic.data(), "\x7F" "FIH", magic.size()));
 }
 // Drops the files named as packages that are not, once every file is written.
 std::string confirm_packages(const std::string& root, std::vector<std::string>& artifacts) {
