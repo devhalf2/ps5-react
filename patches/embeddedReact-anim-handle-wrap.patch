@@ -1,0 +1,241 @@
+Embedded React: unique animation handles, and an end for every animation.
+
+Modified from Embedded React (Apache-2.0, Copyright 2026 Cory Lamming) at the
+revision pinned in dependencies.lock.json, after the patches listed before this
+one there. Changed files: engine/animation/animation.c,
+bridges/quickjs/native_ui_bridge.c, engine/tests/animation/test_animation.c and
+bridges/quickjs/js/test/runtime (new anim-dropped.runtime.test.js). Not yet
+proposed upstream.
+
+Animated values, animations and animation groups share one 16-bit handle
+counter, and every animation started takes a handle. A long session wraps it
+(Pandora's grid takes about 18 per held-key step, so a few minutes of
+scrolling), after which the counter gave out handles still held by live
+values. Lookups by handle find the first slot that matches, so the new value
+bound and drove the older value's node properties, and destroying it freed the
+older value while its own slot stayed in use. Once the counter has wrapped,
+alloc_handle now skips handles a live value, animation or group holds; before
+the first wrap nothing changes.
+
+An animation the engine cannot run (its value is gone, or every animation slot
+is busy) returned without calling on_complete, so the bridge's completion slot
+for its JS callback stayed taken; once the bridge's pool was full no animation
+told JS it had ended. animValueAnimate now ends such an animation at once with
+finished false and frees the slot.
+
+test_animation creates and destroys 70,000 values beside one that lives
+throughout and checks that its handle is not given again and that it alone
+drives its property. anim-dropped animates a destroyed value 300 times and
+checks that each ends and that a live animation still reports its end.
+
+diff --git a/bridges/quickjs/js/test/runtime/anim-dropped.runtime.test.js b/bridges/quickjs/js/test/runtime/anim-dropped.runtime.test.js
+new file mode 100644
+index 0000000..1ee041d
+--- /dev/null
++++ b/bridges/quickjs/js/test/runtime/anim-dropped.runtime.test.js
+@@ -0,0 +1,44 @@
++/*
++ * Copyright 2026 Cory Lamming
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++// Runtime e2e: an animation the engine cannot run (its value is gone) still ends for JS, with
++// { finished: false }, and gives its completion slot back. Before, the callback held its slot for
++// good, and once the bridge's pool was full no animation reported its end.
++import {Animated, Easing} from 'embedded-react';
++import {check, report} from './harness.js';
++
++const lin = {duration: 100, easing: Easing.linear};
++
++{
++  const gone = new Animated.Value(0);
++  gone.destroy();
++  let result = null;
++  Animated.timing(gone, {toValue: 1, ...lin}).start(r => (result = r));
++  check(result && result.finished === false, 'an animation of a destroyed value ends at once, not finished');
++
++  // More of them than the completion pool holds.
++  let ended = 0;
++  for (let i = 0; i < 300; i++) Animated.timing(gone, {toValue: 1, ...lin}).start(() => ended++);
++  check(ended === 300, 'every dropped animation ends');
++
++  const live = new Animated.Value(0);
++  let done = null;
++  Animated.timing(live, {toValue: 100, ...lin}).start(r => (done = r));
++  NativeUI.tick(120);
++  check(done && done.finished === true, 'after them, a live animation still reports its end');
++}
++
++report('anim-dropped');
+diff --git a/bridges/quickjs/native_ui_bridge.c b/bridges/quickjs/native_ui_bridge.c
+index 2366dd3..1bf6652 100644
+--- a/bridges/quickjs/native_ui_bridge.c
++++ b/bridges/quickjs/native_ui_bridge.c
+@@ -152,6 +152,9 @@ static JSValue s_timer_handlers;
+ /** @brief Per-slot "in use" flags for pending animation-completion callbacks. */
+ static bool s_anim_complete_active[ER_BRIDGE_MAX_ANIM_COMPLETIONS];
+ 
++/** @brief Per-slot count of claims, so a caller can tell its claim from a later one of the same slot. */
++static uint32_t s_anim_complete_claims[ER_BRIDGE_MAX_ANIM_COMPLETIONS];
++
+ /**
+  * @brief JS object mapping a completion slot index to the `.start()` callback.
+  *
+@@ -4989,6 +4992,8 @@ static JSValue js_anim_value_animate(JSContext* ctx, JSValueConst this_val, int
+     ERAnimConfig cfg;
+     marshal_anim_config(ctx, argc > 2 ? argv[2] : JS_UNDEFINED, &cfg);
+ 
++    int claimed = -1;
++    uint32_t claim = 0;
+     /* Optional completion callback (argv[3]): grab a slot, root the callback, and route the
+        engine's on_complete through the trampoline. Must be registered BEFORE er_anim_value_animate,
+        which may synchronously cancel a superseded animation (firing that one's callback). */
+@@ -5006,6 +5011,8 @@ static JSValue js_anim_value_animate(JSContext* ctx, JSValueConst this_val, int
+         if (slot >= 0)
+         {
+             s_anim_complete_active[slot] = true;
++            claimed = slot;
++            claim = ++s_anim_complete_claims[slot];
+             JS_SetPropertyUint32(ctx, s_anim_complete_handlers, (uint32_t)slot, JS_DupValue(ctx, argv[3]));
+             cfg.on_complete = bridge_anim_complete_trampoline;
+             cfg.on_complete_user_data = (void*)(uintptr_t)slot;
+@@ -5017,6 +5024,15 @@ static JSValue js_anim_value_animate(JSContext* ctx, JSValueConst this_val, int
+     }
+ 
+     const ERAnimHandle ah = er_anim_value_animate((ERAnimValueHandle)vh, (float)to_value, &cfg);
++    /* The engine drops an animation it cannot run (its value is gone, or every animation slot is busy)
++       without calling on_complete. The callback then held its slot for good, and once the pool was full
++       no animation told JS it had ended. It is told now, as a stopped one; a slot the callback already
++       freed and another animation claimed again is not this one's. */
++    if (ah == ER_ANIM_HANDLE_INVALID && claimed >= 0 && s_anim_complete_active[claimed]
++        && s_anim_complete_claims[claimed] == claim)
++    {
++        bridge_anim_complete_trampoline(false, (void*)(uintptr_t)claimed);
++    }
+     return JS_NewInt32(ctx, (int32_t)ah);
+ }
+ 
+diff --git a/engine/animation/animation.c b/engine/animation/animation.c
+index a8551e5..9de34be 100644
+--- a/engine/animation/animation.c
++++ b/engine/animation/animation.c
+@@ -199,17 +199,53 @@ void er_anim_reset(void)
+  - Functions: Private — handle allocation
+  ---------------------------------------------------------------------------------------------------------------------*/
+ 
++/**
++ * @brief Whether a live value, animation or group holds `handle`.
++ *
++ * @param[in] handle  Handle to look for.
++ *
++ * @return true when one of the three pools holds it.
++ */
++static bool handle_in_use(uint16_t handle)
++{
++    for (int i = 0; i < ERUI_MAX_ANIM_VALUES; i++)
++        if (s_anim_values[i].in_use && s_anim_values[i].handle == handle)
++            return true;
++    for (int i = 0; i < ERUI_MAX_ANIMATIONS; i++)
++        if (s_animations[i].active && s_animations[i].handle == handle)
++            return true;
++    for (int i = 0; i < ERUI_MAX_ANIM_GROUPS; i++)
++        if (s_groups[i].active && s_groups[i].handle == handle)
++            return true;
++    return false;
++}
++
+ /**
+  * @brief Allocates a unique animation handle.
+  *
++ * Values, animations and groups share one 16-bit counter, and every animation started takes a
++ * handle, so a long session wraps it (a store's grid scrolled for minutes takes tens of thousands).
++ * Once it has wrapped, handles still held are skipped: a handle given twice made lookups find the
++ * older owner, so a new value bound and drove another element's property, and destroying it freed
++ * the older value and leaked its own slot until the pool was full. The pools hold far fewer than
++ * 65535 entries, so a free handle is always found.
++ *
+  * @return Non-zero handle.
+  */
+ static uint16_t alloc_handle(void)
+ {
+-    uint16_t h = s_next_handle++;
+-    if (s_next_handle == 0)
+-        s_next_handle = 1;
+-    return h;
++    static bool wrapped = false;
++    for (;;)
++    {
++        uint16_t h = s_next_handle++;
++        if (s_next_handle == 0)
++        {
++            s_next_handle = 1;
++            wrapped = true;
++        }
++        if (!wrapped || !handle_in_use(h))
++            return h;
++    }
+ }
+ 
+ /*----------------------------------------------------------------------------------------------------------------------
+diff --git a/engine/tests/animation/test_animation.c b/engine/tests/animation/test_animation.c
+index 3648d19..13d5552 100644
+--- a/engine/tests/animation/test_animation.c
++++ b/engine/tests/animation/test_animation.c
+@@ -1157,5 +1157,46 @@ int main(void)
+         er_node_destroy(other);
+     }
+ 
++    /* -----------------------------------------------------------------------
++     * HANDLE WRAP: past 65535 handles, one still held is not given again
++     * ---------------------------------------------------------------------- */
++    {
++        ERNode* kept = er_node_create(ER_NODE_VIEW);
++        ERNode* churn = er_node_create(ER_NODE_VIEW);
++        ERProps wp = props_default();
++        wp.width = 10;
++        wp.height = 10;
++        er_node_set_props(kept, &wp);
++        er_node_set_props(churn, &wp);
++
++        /* A value that lives for the whole session (a header's), then a long session of values that come
++         * and go (cards mounting as a grid scrolls), enough to wrap the 16-bit handle counter. */
++        ERAnimValueHandle old = er_anim_value_create(0.0f);
++        if (old == ER_ANIM_VALUE_INVALID)
++            return fail("wrap: er_anim_value_create returned INVALID");
++        er_anim_value_bind(old, kept, ER_PROP_TRANSLATE_X);
++        er_anim_value_set(old, 10.0f);
++        for (int i = 0; i < 70000; i++)
++        {
++            ERAnimValueHandle h = er_anim_value_create(0.0f);
++            if (h == ER_ANIM_VALUE_INVALID)
++                return fail("wrap: the value pool filled with one value created and destroyed at a time");
++            if (h == old)
++                return fail("wrap: a handle still held was given to a new value");
++            er_anim_value_bind(h, churn, ER_PROP_TRANSLATE_X);
++            er_anim_value_set(h, 50.0f);
++            er_anim_value_destroy(h);
++        }
++        if (kept->tp_translate_x < 9.9f || kept->tp_translate_x > 10.1f)
++            return fail("wrap: a new value drove a property bound to an older one");
++        er_anim_value_set(old, 20.0f);
++        if (kept->tp_translate_x < 19.9f || kept->tp_translate_x > 20.1f)
++            return fail("wrap: the older value stopped driving its own property");
++
++        er_anim_value_destroy(old);
++        er_node_destroy(kept);
++        er_node_destroy(churn);
++    }
++
+     return EXIT_SUCCESS;
+ }

@@ -41,7 +41,8 @@
       "patches/embeddedReact-fade-cache-scope.patch",
       "patches/embeddedReact-subpixel-letter-spacing.patch",
       "patches/embeddedReact-view-cutout.patch",
-      "patches/embeddedReact-4k-fps.patch"
+      "patches/embeddedReact-4k-fps.patch",
+      "patches/embeddedReact-anim-handle-wrap.patch"
     ]
   },
   "platform": {
