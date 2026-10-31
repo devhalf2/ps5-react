@@ -1,0 +1,19 @@
+{
+  "$schema": "../../../app.schema.json",
+  "titleId": "PPSA99098",
+  "contentId": "UP9000-PPSA99098_00-PS5REACTDAEMON00",
+  "name": "PS5 React Daemon Test",
+  "version": "01.002.003",
+  "render": {
+    "width": 1280,
+    "height": 720
+  },
+  "surface": {
+    "width": 1280,
+    "height": 720
+  },
+  "timeoutSeconds": 0,
+  "networking": true,
+  "filesystemAccess": "console",
+  "daemon": "daemon/main.js"
+}
