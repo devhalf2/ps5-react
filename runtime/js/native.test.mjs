@@ -355,7 +355,7 @@ test('Daemon.start resolves ok or the reason, never rejects, and reads the host 
   globalThis.__ps5ReactNative = {daemon: {supported: true, isDaemon: false, args: null,
     start: (token, stateDir) => { starts.push([token, stateDir]); return starts.length; }, poll: () => snapshots, cancel() {}}};
   try {
-    assert.deepEqual([Daemon.supported, Daemon.isDaemon, Daemon.args], [true, false, null]);
+    assert.deepEqual([Daemon.supported, Daemon.isDaemon, Daemon.args, Daemon.pid, Daemon.port], [true, false, null, null, 9061]);
     const ready = Daemon.start({token: 'a'.repeat(32), stateDir: '/data/queue'});
     await Promise.resolve();
     snapshots = [{id: 1, state: 'completed', error: ''}];
@@ -386,7 +386,7 @@ test('Daemon.serve hands each request to the handler and answers what it returns
   const answers = [];
   const originalError = console.error;
   console.error = () => {};
-  globalThis.__ps5ReactNative = {daemon: {supported: true, isDaemon: true, args: {token: 't', stateDir: '/s', version: '1'},
+  globalThis.__ps5ReactNative = {daemon: {supported: true, isDaemon: true, args: {token: 't', stateDir: '/s', version: '1'}, pid: 4321, port: 19061,
     serve: handler => { callback = handler; }, exit() {}}};
   try {
     assert.throws(() => Daemon.serve('handler'), TypeError);
@@ -403,6 +403,8 @@ test('Daemon.serve hands each request to the handler and answers what it returns
     assert.equal(answers[0][1].body, '{"a":"1"}');
     assert.match(answers[2][1].body, /broken/);
     assert.deepEqual(Daemon.args, {token: 't', stateDir: '/s', version: '1'});
+    assert.equal(Daemon.pid, 4321);
+    assert.equal(Daemon.port, 19061);
     assert.equal(Daemon.isDaemon, true);
   } finally {
     console.error = originalError;

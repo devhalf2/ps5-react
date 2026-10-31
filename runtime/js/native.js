@@ -575,6 +575,11 @@ export const Daemon = Object.freeze({
   /** Inside the daemon `{token, stateDir, version}` from Daemon.start; null in the app.
    * @returns {{token: string, stateDir: string, version: string} | null} */
   get args() { return host().daemon?.args ?? null; },
+  /** Inside the daemon its process ID; null in the app. @returns {number | null} */
+  get pid() { return host().daemon?.pid ?? null; },
+  /** The loopback port the daemon serves on, in both processes: 9061 (on the desktop
+   * PS5_REACT_DAEMON_PORT may move it). @returns {number} */
+  get port() { return host().daemon?.port ?? 9061; },
   /**
    * App side: starts the daemon unless one already answers, and resolves once it serves. Never rejects.
    * @param {{token: string, stateDir: string}} options

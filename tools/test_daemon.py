@@ -169,12 +169,20 @@ def run(command, build, env, data_dir, file_port):
     assert echo["headers"]["x-custom"] == "Value" and echo["headers"]["x-pandora-token"] == TOKEN, echo
     assert echo["isDaemon"] is True and echo["supported"] is True and echo["platform"] == "desktop", echo
     assert echo["args"] == {"token": TOKEN, "stateDir": "/download0/daemon-state", "version": "01.002.003"}, echo
+    assert isinstance(echo["pid"], int) and echo["pid"] > 1 and echo["port"] == PORT, echo
     assert echo["timers"] > 0, "setInterval runs between requests"
     for absent in ("image", "sound", "shader", "browser", "pad", "text", "openURL", "exit"):
         assert absent not in echo["modules"], echo["modules"]
-    for present in ("fs", "network", "archives", "packages", "power", "notify", "daemon"):
+    for present in ("fs", "network", "archives", "packages", "power", "notify", "daemon", "system", "notifications"):
         assert present in echo["modules"], echo["modules"]
     print("PASS: a request with the token reaches the script: method, path, query, lowercase headers, body, args.")
+
+    status, _, body = request("POST", "/system")
+    system = json.loads(body)
+    assert status == 200 and system["states"] == ["game-started", "game-ended"], system
+    assert system["running"] == {"titleId": "PPSA01234"} and system["after"] is None, system
+    assert isinstance(system["sent"], bool), "Notifications.send falls back to show on the desktop and returns its result"
+    print("PASS: System state changes and Notifications.send reach the daemon's script.")
 
     # Keep-alive: three requests on one connection; a slow request does not hold up another client.
     connection = http.client.HTTPConnection("127.0.0.1", PORT, timeout=15)

@@ -726,6 +726,8 @@ const hello = await Http.request('http://127.0.0.1:9061/hello');
 | `Daemon.supported` | both | The app declares a `daemon` entry |
 | `Daemon.isDaemon` | both | True only inside the daemon |
 | `Daemon.args` | daemon | `{token, stateDir, version}` from `Daemon.start`; `null` in the app |
+| `Daemon.pid` | daemon | The daemon's process ID (for `/hello` and the owner lock); `null` in the app |
+| `Daemon.port` | both | The loopback port it serves on: 9061, or `PS5_REACT_DAEMON_PORT` on the desktop |
 | `Daemon.start({token, stateDir})` | app | `Promise<{ok, error?}>`; never rejects |
 | `Daemon.serve(handler)` | daemon | Answers each request with what `handler` returns or resolves |
 | `Daemon.exit(code)` | daemon | Answers what is pending, stops the native services, flushes the log, exits |
@@ -733,7 +735,7 @@ const hello = await Http.request('http://127.0.0.1:9061/hello');
 **Build.** The build bundles the entry with `@ps5-react/core` resolving to the
 modules a daemon can use (`runtime/js/headless.js`): `Downloads`, `Http`,
 `FileSystem`, `DownloadFormats`, `Archives`, `Packages`, `Notifications`,
-`Power`, `Platform`, `DeviceInfo` and `Daemon`, plus timers and `console`.
+`Power`, `Platform`, `DeviceInfo`, `System` and `Daemon`, plus timers and `console`.
 Importing a UI module or `Linking`/`BrowserCapture` fails the build. It runs in
 `pandorad`, a host with QuickJS and those native modules and no window, GL,
 input or sound: `pandorad.elf` in the PS5 app folder, a `pandorad` program
@@ -754,7 +756,8 @@ at most 128 characters and `stateDir` an absolute path.
   the app. It needs console filesystem access.
 - Desktop: the preview spawns `pandorad` in a session of its own (`setsid`), so
   closing the preview leaves it running. `PS5_REACT_DAEMON_PORT` moves the
-  preview's daemon off 9061, for tests beside other programs.
+  preview's daemon off 9061, for tests beside other programs; `Daemon.port`
+  tells the app where to reach it.
 
 **Serving.** The first request waits until the script calls `Daemon.serve`; the
 port is bound before the script runs, so a second daemon leaves before any of

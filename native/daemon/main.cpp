@@ -14,6 +14,7 @@
 #include "network.hpp"
 #include "packages.hpp"
 #include "removals.hpp"
+#include "system_state.hpp"
 #include "thread_name.hpp"
 #include "worker_thread.hpp"
 #include <algorithm>
@@ -306,6 +307,8 @@ void install_api(JSContext* ctx) {
 int run() {
   name_thread("pandorad");
   if (!network::start()) log_line("network: the transport did not start; Downloads and Http will fail");
+  // Rest mode, resume and a running game (System.onStateChange); installing the API also starts it.
+  if (!system_state::start()) log_line("system: the state watcher thread did not start");
   if (!js::start(kHeapBytes, kScriptStack, log_line)) {
     answer("error the script runtime did not start");
     return 1;
@@ -337,6 +340,7 @@ int run() {
   packages::stop();
   removals::stop();
   network::stop();
+  system_state::stop();
   JS_FreeValue(js::context(), serve_callback);
   serve_callback = JS_UNDEFINED;
   js::stop();
@@ -353,6 +357,8 @@ JSValue ps5_react_daemon_api(JSContext* ctx) {
   set_string(ctx, values, "stateDir", args.state_dir);
   set_string(ctx, values, "version", args.version);
   JS_SetPropertyStr(ctx, api, "args", values);
+  JS_SetPropertyStr(ctx, api, "pid", JS_NewInt32(ctx, static_cast<int32_t>(getpid())));
+  JS_SetPropertyStr(ctx, api, "port", JS_NewInt32(ctx, daemon_process::port()));
   JS_SetPropertyStr(ctx, api, "serve", JS_NewCFunction(ctx, serve, "serve", 1));
   JS_SetPropertyStr(ctx, api, "exit", JS_NewCFunction(ctx, exit_daemon, "exit", 1));
   return api;

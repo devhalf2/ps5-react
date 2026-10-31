@@ -92,6 +92,7 @@ JSValue ps5_react_daemon_api(JSContext* ctx) {
   JS_SetPropertyStr(ctx, api, "supported", JS_NewBool(ctx, PS5_REACT_DAEMON));
   JS_SetPropertyStr(ctx, api, "isDaemon", JS_FALSE);
   JS_SetPropertyStr(ctx, api, "args", JS_NULL);
+  JS_SetPropertyStr(ctx, api, "port", JS_NewInt32(ctx, daemon_process::port()));
   JS_SetPropertyStr(ctx, api, "start", JS_NewCFunction(ctx, start, "start", 2));
   JS_SetPropertyStr(ctx, api, "cancel", JS_NewCFunction(ctx, cancel, "cancel", 1));
   JS_SetPropertyStr(ctx, api, "poll", JS_NewCFunction(ctx, poll, "poll", 0));

@@ -99,6 +99,8 @@
 //   daemon.supported               ABI v11; the app declares a daemon entry (app.json "daemon")
 //   daemon.isDaemon                true only in pandorad, the headless daemon host (native/daemon)
 //   daemon.args                    in the daemon {token, stateDir, version}; null in the app
+//   daemon.pid                     in the daemon its process ID (for /hello and the owner lock); absent in the app
+//   daemon.port                    the loopback port the daemon serves on: 9061, or PS5_REACT_DAEMON_PORT on the desktop
 //   daemon.start(token, stateDir)  app; task ID; starts pandorad (PS5: through the payload loader, after
 //                                  copying the worker ELFs to the title's /data folder) and completes once
 //                                  it is ready or one already answers GET /hello on 127.0.0.1:9061

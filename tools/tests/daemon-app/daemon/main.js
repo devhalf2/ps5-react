@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Additional attribution term: see LICENSE-ATTRIBUTION.
 // The fixture daemon tools/test_daemon.py drives: each route exercises one part of the contract.
-import {Archives, Daemon, Downloads, FileSystem, Platform} from '@ps5-react/core';
+import {Archives, Daemon, Downloads, FileSystem, Notifications, Platform, System} from '@ps5-react/core';
 
 const {version, stateDir} = Daemon.args;
 const startedAt = Date.now();
@@ -18,7 +18,7 @@ Daemon.serve(async ({method, path, query, headers, body}) => {
   if (path === '/hello') return json(200, {protocol: 1, version, startedAt});
   if (path === '/echo') {
     return json(200, {method, path, query, headers, body, isDaemon: Daemon.isDaemon, supported: Daemon.supported,
-      platform: Platform.OS, args: Daemon.args, timers, modules: Object.keys(globalThis.__ps5ReactNative).sort()});
+      platform: Platform.OS, args: Daemon.args, pid: Daemon.pid, port: Daemon.port, timers, modules: Object.keys(globalThis.__ps5ReactNative).sort()});
   }
   if (path === '/download' && method === 'POST') {
     const {url, destination} = JSON.parse(body);
@@ -30,6 +30,18 @@ Daemon.serve(async ({method, path, query, headers, body}) => {
     const {source, destination} = JSON.parse(body);
     const result = await Archives.extract({sources: [source], destination}).done;
     return json(200, {state: result.state, files: FileSystem.readDir(destination).map(entry => entry.name).filter(name => !name.startsWith('.')).sort()});
+  }
+  if (path === '/system' && method === 'POST') {
+    const states = [];
+    const unsubscribe = System.onStateChange(event => states.push(event.state));
+    System.simulate('game-started', {titleId: 'PPSA01234'});
+    await wait(700);
+    const running = System.runningGame();
+    System.simulate('game-ended');
+    await wait(700);
+    unsubscribe();
+    const sent = Notifications.send({id: 'fixture', title: 'Fixture', body: 'from the daemon'});
+    return json(200, {states, running, after: System.runningGame(), sent});
   }
   if (path === '/wait') {
     await wait(Number(query.ms));

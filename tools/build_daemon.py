@@ -13,10 +13,11 @@ from common import ROOT
 def sources(hui, generated):
     native = ROOT / "native"
     return [*(native / "daemon" / f"{name}.cpp" for name in ("main", "js_runtime", "http_server", "headless", "archive_hooks", "ps5")),
-            *(native / "ps5" / f"{name}.cpp" for name in ("host_platform", "async_log", "payload_loader", "package_installer")),
+            *(native / "ps5" / f"{name}.cpp" for name in ("host_platform", "async_log", "payload_loader", "package_installer", "system_platform")),
             *(native / "shared" / f"{name}.cpp" for name in ("host_api", "removals", "network", "network_api", "archives",
                                                              "archive_preflight", "rar5_password", "archive_writer",
-                                                             "archive_api", "package_api")),
+                                                             "archive_api", "package_api", "system_state",
+                                                             "notifications_api")),
             hui / "src/platform/ps5/system.cpp", generated / "daemon_bundle.c"]
 
 

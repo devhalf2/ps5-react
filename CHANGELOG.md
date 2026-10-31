@@ -7,11 +7,11 @@ One ABI bump, v11, covers the three additions below (System, Notifications.send,
 - An app can declare a headless second script, `"daemon": "daemon/main.js"` in `app.json` (with networking
   and console filesystem access). The build bundles it into `pandorad`: QuickJS with the native modules that
   need no screen (Downloads, Http, FileSystem, DownloadFormats, Archives, Packages, Notifications, Power,
-  Platform), timers on the system clock and a 32 MiB heap, and no window, GL, input or sound. On PS5 it is
+  Platform, System), timers on the system clock and a 32 MiB heap, and no window, GL, input or sound. On PS5 it is
   `pandorad.elf`, a payload for the loader on 9021, so it outlives the app; on the desktop a `pandorad`
   program beside the preview, started in a session of its own.
 - New `Daemon` module (native API ABI v11): `Daemon.start({token, stateDir})` in the app; `Daemon.args`,
-  `Daemon.serve(handler)` and `Daemon.exit(code)` in the daemon, which serves HTTP/1.1 on 127.0.0.1:9061
+  `Daemon.pid`, `Daemon.port`, `Daemon.serve(handler)` and `Daemon.exit(code)` in the daemon, which serves HTTP/1.1 on 127.0.0.1:9061
   (token checked natively except `GET /hello` and `/i/`, keep-alive, 1 MiB bodies, 8 connections). Its log is
   `<FileSystem.dataDir>/daemon.log`, the previous run's kept as `daemon.prev.log`. On PS5, `Daemon.start`
   copies `rar-extract.elf` and `pkg-installer.elf` to `/data/ps5-react/<TITLE>/bin/` (SHA-256 checked) and
@@ -25,7 +25,8 @@ One ABI bump, v11, covers the three additions below (System, Notifications.send,
   SIGCONT and 10-second gaps in its own schedule, and every 3 s `sceSystemServiceGetAppIdOfRunningBigApp`
   and `sceSystemServiceGetAppTitleId`. Native services can read `system_state::suspended()`,
   `game_running()` and `resumed_at_us()`; the network and archive services do not use them yet.
-  `System.simulate` and the preview's `ps5_drive.py system <state>` inject states for tests.
+  `System.simulate` and the preview's `ps5_drive.py system <state>` inject states for tests. pandorad runs
+  the same watcher (started with its services, stopped on exit) and exports `System`.
 - `Notifications.send({id, title, body, icon, kind})` sends a rich Downloads-channel toast through
   `sceNotificationSend`; a later toast with the same id replaces it (`bundleName` from the id). It falls
   back to `Notifications.show`, which is unchanged.
