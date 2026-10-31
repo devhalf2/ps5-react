@@ -142,6 +142,7 @@ def run(command, build, env, data_dir, file_port):
             reports[name] = json.loads(value) if value.startswith(("{", "\"", "[")) else value
     assert result.returncode == 0 and "failed" not in reports, result.stdout[-4000:] + result.stderr[-2000:]
     assert reports["app"] == {"supported": True, "isDaemon": False, "args": None}, reports
+    assert reports["refused"]["ms"] < 3000 and reports["refused"]["error"] != "answered", reports
     tokens = reports["random"]
     assert all(len(t) == 32 and int(t, 16) >= 0 for t in tokens) and tokens[0] != tokens[1], reports
     assert "only the daemon serves" in reports["serve"], reports

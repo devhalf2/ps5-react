@@ -24,6 +24,9 @@ struct Request {
   unsigned connections = 8;
   bool resume = true, adaptive = true, recover_completed = false;
   bool follow_redirects = true, reject_html = false;
+  // False: a failure fails the request at once, without the retries a busy server gets (a refused
+  // loopback port, for a caller that asks whether something listens).
+  bool retry = true;
 };
 struct Snapshot {
   std::uint32_t id = 0;

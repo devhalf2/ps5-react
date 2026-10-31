@@ -54,7 +54,8 @@
 //     options: expectedBytes, storageRoot, pieces[{url, offset, size, sha1}],
 //              sha256, connections, adaptive, rangeBytes, resume, recoverCompleted, headers, rejectHtml
 //   network.request(url, options)  task ID; queues bounded HTTP text I/O
-//     options: method, body, maxBytes, headers, followRedirects (default true)
+//     options: method, body, maxBytes, headers, followRedirects (default true), retry (default true;
+//     false fails at the first error instead of retrying with backoff)
 //     terminal snapshots: status, body, effective url, allowlisted lowercase headers
 //   network.cancel(id)             requests cancellation
 //   network.poll()                 progress/results; consumes terminal snapshots

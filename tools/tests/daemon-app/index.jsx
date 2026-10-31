@@ -4,7 +4,7 @@
 // tools/test_daemon.py: starts the daemon from the app, twice (the second finds it serving), reports on
 // stdout and closes; the test then talks to the daemon the app left running.
 import {useEffect} from 'react';
-import {AppRegistry, BackHandler, Daemon, View} from '@ps5-react/core';
+import {AppRegistry, BackHandler, Daemon, Http, View} from '@ps5-react/core';
 
 export const TOKEN = '0123456789abcdef0123456789abcdef';
 
@@ -14,6 +14,10 @@ async function run() {
   report('random', [Daemon.randomToken(), Daemon.randomToken()]);
   try { Daemon.serve(() => ({status: 200})); report('serve', 'accepted'); }
   catch (error) { report('serve', error.message); }
+  // Nothing listens yet: without retries a refused loopback port fails at once.
+  const asked = Date.now();
+  const refused = await Http.request(`http://127.0.0.1:${Daemon.port}/hello`, {retry: false}).then(() => 'answered', error => error.message);
+  report('refused', {ms: Date.now() - asked, error: refused});
   report('invalid', await Daemon.start({token: 'two\nlines', stateDir: '/download0/daemon-state'}));
   report('start', await Daemon.start({token: TOKEN, stateDir: '/download0/daemon-state'}));
   report('again', await Daemon.start({token: TOKEN, stateDir: '/download0/daemon-state'}));
