@@ -1,7 +1,7 @@
 // Copyright (C) 2026 half144 and PS5 React contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Additional attribution term: see LICENSE-ATTRIBUTION.
-// Native API contract (ABI v10) between the hosts and `@ps5-react/core`. The input actions hosts
+// Native API contract (ABI v11) between the hosts and `@ps5-react/core`. The input actions hosts
 // pass to `__ps5ReactDispatch` are a separate contract with its own version (runtime/js/input.js).
 //
 // host_api.cpp (shared) installs `globalThis.__ps5ReactNative` through
@@ -42,12 +42,20 @@
 //   pad.vibrate(strength, seconds) strength 0..1
 //   pad.state()                    {connected, leftX, leftY, rightX, rightY, l2, r2, buttons}
 //   power.keepAwake(enabled)       ABI v4; while true, the console does not enter rest mode
-//                                  for inactivity (the desktop display does not sleep)
+//                                  for inactivity (the desktop display does not sleep); ABI v11: also
+//                                  resets the auto power-down timer every 60 s
+//   system.poll()                  ABI v11; [{state, at, source, titleId?, pausedMs?}] since the last
+//                                  poll; state 'sleeping' | 'resumed' | 'game-started' | 'game-ended'
+//   system.runningGame()           {titleId} | null; the game the watcher last saw (system_state.hpp)
+//   system.simulate(state, titleId) test hook: reports a state as the platform would; boolean
+//   notifications.send(id, title, body, icon, kind) ABI v11; boolean; a rich toast whose id replaces
+//                                  the previous one with that id; falls back to notify()
 //   network.download(url, path, options) task ID; queues native binary file I/O
 //     options: expectedBytes, storageRoot, pieces[{url, offset, size, sha1}],
 //              sha256, connections, adaptive, rangeBytes, resume, recoverCompleted, headers, rejectHtml
 //   network.request(url, options)  task ID; queues bounded HTTP text I/O
-//     options: method, body, maxBytes, headers, followRedirects (default true)
+//     options: method, body, maxBytes, headers, followRedirects (default true), retry (default true;
+//     false fails at the first error instead of retrying with backoff)
 //     terminal snapshots: status, body, effective url, allowlisted lowercase headers
 //   network.cancel(id)             requests cancellation
 //   network.poll()                 progress/results; consumes terminal snapshots
@@ -89,6 +97,19 @@
 //                                  0.05..1, uniforms {name: number | [2..4 numbers]}; all optional
 //   shader.destroy(id)
 //   shader.error(id)               the GLSL info log of a failed compile or link, else null
+//   daemon.supported               ABI v11; the app declares a daemon entry (app.json "daemon")
+//   daemon.isDaemon                true only in pandorad, the headless daemon host (native/daemon)
+//   daemon.args                    in the daemon {token, stateDir, version}; null in the app
+//   daemon.pid                     in the daemon its process ID (for /hello and the owner lock); absent in the app
+//   daemon.randomToken()           app; 32 hex characters from /dev/urandom for daemon.token, or null
+//   daemon.port                    the loopback port the daemon serves on: 9061, or PS5_REACT_DAEMON_PORT on the desktop
+//   daemon.start(token, stateDir)  app; task ID; starts pandorad (PS5: through the payload loader, after
+//                                  copying the worker ELFs to the title's /data folder) and completes once
+//                                  it is ready or one already answers GET /hello on 127.0.0.1:9061
+//   daemon.poll() / cancel(id)     app; state/error of the start; cancel stops waiting only
+//   daemon.serve(callback)         daemon; listens on 127.0.0.1:9061, calls callback(request, respond) per
+//                                  request; respond({status, headers, body}) answers it
+//   daemon.exit(code)              daemon; answers what is pending, stops the services and exits
 //   exit(relaunch)                 asks the host to close after this frame; with relaunch true it
 //                                  opens the app again once closed and returns true, or the reason
 //                                  it cannot (PS5: needs the payload loader on 127.0.0.1:9021)
@@ -217,3 +238,6 @@ JSValue ps5_react_package_api(JSContext* ctx);
 
 // ABI v7: filename-bound browser capture tasks (PS5 only).
 JSValue ps5_react_browser_capture_api(JSContext* ctx);
+// ABI v11: the app's daemon. The app's hosts start it (native/shared/daemon_api.cpp); pandorad defines its
+// own, which serves (native/daemon).
+JSValue ps5_react_daemon_api(JSContext* ctx);

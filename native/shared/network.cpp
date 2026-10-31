@@ -1651,7 +1651,7 @@ void Service::run_job(const std::shared_ptr<Job>& job) {
               ++forgiven[t.piece]; ++job->retries;
               requeue(t, attempt-1, now+retry_delay(t, 1));
             } else {
-              unsigned allowed_attempts = attempt_limit(t);
+              unsigned allowed_attempts = job->request.retry ? attempt_limit(t) : 0;
               if (forget_mirror(*job, t)) allowed_attempts = std::max(allowed_attempts, 4u);
               else if (forget_redirect(*job, t, attempt)) allowed_attempts = std::max(allowed_attempts, 4u);
               if (attempt >= allowed_attempts) { job->fail(describe(t)); break; }

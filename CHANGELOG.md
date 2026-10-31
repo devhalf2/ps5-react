@@ -1,5 +1,50 @@
 # Changelog
 
+## Unreleased — background daemon, console states, rich toasts (native API ABI v11)
+
+One ABI bump, v11, covers the three additions below (System, Notifications.send, Daemon).
+
+- An app can declare a headless second script, `"daemon": "daemon/main.js"` in `app.json` (with networking
+  and console filesystem access). The build bundles it into `pandorad`: QuickJS with the native modules that
+  need no screen (Downloads, Http, FileSystem, DownloadFormats, Archives, Packages, Notifications, Power,
+  Platform, System), timers on the system clock and a 32 MiB heap, and no window, GL, input or sound. On PS5 it is
+  `pandorad.elf`, a payload for the loader on 9021, so it outlives the app; on the desktop a `pandorad`
+  program beside the preview, started in a session of its own.
+- New `Daemon` module (native API ABI v11): `Daemon.start({token, stateDir})` in the app; `Daemon.args`,
+  `Daemon.pid`, `Daemon.port`, `Daemon.randomToken()`, `Daemon.serve(handler)` and `Daemon.exit(code)` in the daemon, which serves HTTP/1.1 on 127.0.0.1:9061
+  (token checked natively except `GET /hello` and `/i/`, keep-alive, 1 MiB bodies, 8 connections). Its log is
+  `<FileSystem.dataDir>/daemon.log`, the previous run's kept as `daemon.prev.log`. On PS5, `Daemon.start`
+  copies `rar-extract.elf` and `pkg-installer.elf` to `/data/ps5-react/<TITLE>/bin/` (SHA-256 checked) and
+  the daemon starts them from there: the payload loader client now sends a program from any app path
+  (`payload_loader::set_directory`). `tools/test_daemon.py` covers the desktop end to end; `tools/verify.py`
+  checks `pandorad.elf` and its hash. Not yet run on a console.
+- `System.onStateChange(listener)` reports `sleeping`, `resumed`, `game-started` and
+  `game-ended` events (`{state, at, source, titleId?, pausedMs?}`) on the JavaScript thread, and
+  `System.runningGame()` the game running beside the app. A watcher thread (`native/shared/system_state.cpp`)
+  reads `sceSystemServiceReceiveEvent` (BEFORE_SLEEP, ON_RESUME), the `SceSystemStateMgrInfo` event flag,
+  SIGCONT and 10-second gaps in its own schedule, and every 3 s `sceSystemServiceGetAppIdOfRunningBigApp`
+  and `sceSystemServiceGetAppTitleId`. Native services can read `system_state::suspended()`,
+  `game_running()` and `resumed_at_us()`; the network and archive services do not use them yet.
+  `System.simulate` and the preview's `ps5_drive.py system <state>` inject states for tests. pandorad runs
+  the same watcher (started with its services, stopped on exit) and exports `System`.
+- `Notifications.send({id, title, body, icon, kind})` sends a rich Downloads-channel toast through
+  `sceNotificationSend`; a later toast with the same id replaces it (`bundleName` from the id). It falls
+  back to `Notifications.show`, which is unchanged.
+- `Power.keepAwake(true)` also calls `sceShellCoreUtilResetAutoPowerDownTimer` every 60 s.
+- The new Sony calls outside libkernel and `sceSystemServiceReceiveEvent` are looked up at run time, so a
+  firmware without them loses one feature instead of the title not starting. None of this has run on a
+  console yet; the log records each call's first result.
+
+## Unreleased — PKG install from a URL, console spike
+
+- `pkg-installer.elf` takes a second request, `PKI2`, for a console experiment: a package path or an
+  http(s) URL of at most 127 bytes that the console's installer downloads itself, with the content ID
+  required for a URL, raw status dumps (`dump`), exit after `started` (`detach`) and another install in
+  the same process (`more`). It bounds `sceAppInstUtilInitialize` at 10 s. `PKI1`, which the engine sends,
+  is unchanged. `tools/spike/pkg-url/` holds the Mac side: a Range server that logs every request, a sender
+  for the loader on 9021, a content-ID reader and the T1–T10 test steps (`tools/test_spike_pkg_url.py`).
+  Not yet run on a console.
+
 ## Unreleased — animation handles after a long session
 
 - Animated values, animations and groups share one 16-bit handle counter, and every animation started takes

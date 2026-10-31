@@ -101,6 +101,11 @@
       "default": false,
       "description": "Enable native HTTP and large-file downloads; PS5 requires filesystemAccess: console. Desktop networking is available independently."
     },
+    "daemon": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_][A-Za-z0-9_./-]*\\.(js|mjs|jsx)$",
+      "description": "Relative path of a headless script (no UI) built into pandorad, which keeps running after the app closes and serves 127.0.0.1:9061; see Daemon in docs/NATIVE-API.md. Requires networking and filesystemAccess: console."
+    },
     "resources": {
       "type": "array",
       "maxItems": 16,

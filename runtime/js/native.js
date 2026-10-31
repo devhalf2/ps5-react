@@ -95,10 +95,81 @@ export const FileSystem = {
   diskUsage: path => host().fs.diskUsage(path),
 };
 
+/**
+ * @typedef {'info' | 'done' | 'failed' | 'attention'} ToastKind
+ * @typedef {{id: string, title: string, body?: string, icon?: string, kind?: ToastKind}} Toast
+ *   `icon` is an app path (/download0/icons/x.png) or an http(s) URL; without one, the kind picks a
+ *   system icon ('failed' and 'attention' a caution sign, the others a download arrow).
+ */
+
 export const Notifications = {
   /** @param {string} message @param {string} [subMessage] @returns {boolean} */
   show: (message, subMessage = '') => host().notify(message, subMessage),
+  /**
+   * A rich toast in the system's Downloads channel. A later toast with the same `id` replaces this
+   * one instead of stacking. Falls back to `show(title, body)` where rich toasts are unavailable (the
+   * desktop preview prints it). @param {Toast} toast @returns {boolean} whether a toast was sent
+   */
+  send({id, title, body = '', icon = '', kind = 'info'}) {
+    if (typeof id !== 'string' || id === '') throw new TypeError('Notifications.send: id must be a non-empty string');
+    if (typeof title !== 'string') throw new TypeError(`Notifications.send ${id}: title must be a string`);
+    return host().notifications.send(id, title, String(body), String(icon), kind);
+  },
 };
+
+/**
+ * @typedef {'sleeping' | 'resumed' | 'game-started' | 'game-ended'} SystemState
+ * @typedef {{state: SystemState, at: number, source: string, titleId?: string, pausedMs?: number}} SystemEvent
+ *   `at` is milliseconds since the Unix epoch. `source` says what reported it: 'event' (the system
+ *   service), 'state-flag' (the state manager), 'sigcont', 'gap' (the process did not run for over
+ *   10 s; `pausedMs` says how long), 'game-poll' or 'simulated'. game-started/game-ended carry `titleId`.
+ */
+
+const systemListeners = new Set();
+let systemTimer = null;
+
+function pollSystem() {
+  for (const event of host().system.poll()) {
+    const frozen = Object.freeze(event);
+    for (const listener of [...systemListeners]) {
+      try { listener(frozen); }
+      catch (error) { console.error('System state listener failed:', error); }
+    }
+  }
+}
+
+/** Console state: rest mode, resume, and a game running beside the app (docs/NATIVE-API.md). */
+export const System = Object.freeze({
+  /**
+   * Calls `listener` on the JavaScript thread for each state change after this call; a resume that
+   * several sources report arrives once. Returns the function that unsubscribes it.
+   * @param {(event: SystemEvent) => void} listener @returns {() => void}
+   */
+  onStateChange(listener) {
+    if (typeof listener !== 'function') throw new TypeError('System.onStateChange: expected a function');
+    if (systemListeners.size === 0) {
+      host().system.poll(); // Changes from before the first listener are not replayed.
+      systemTimer = setInterval(pollSystem, 500);
+    }
+    systemListeners.add(listener);
+    return () => {
+      if (!systemListeners.delete(listener) || systemListeners.size > 0) return;
+      clearInterval(systemTimer);
+      systemTimer = null;
+    };
+  },
+  /**
+   * The game running beside the app, as last checked (every 3 s), or null. Best effort and not yet
+   * verified on a console; always null in the desktop preview unless simulated.
+   * @returns {{titleId: string} | null}
+   */
+  runningGame: () => host().system.runningGame(),
+  /**
+   * Test hook: reports `state` as the console would, to listeners and to the native services.
+   * @param {SystemState} state @param {{titleId?: string}} [options] the game for 'game-started'
+   */
+  simulate: (state, {titleId = ''} = {}) => host().system.simulate(state, titleId),
+});
 
 export const Users = {
   /** @returns {User | null} */
@@ -178,7 +249,8 @@ export const Linking = {
 export const Power = {
   /**
    * While on, the console does not enter rest mode for inactivity (the desktop display does not
-   * sleep): turn it on for a long download, off when it ends. The last call wins.
+   * sleep): turn it on for a long download, off when it ends. The last call wins. On PS5 it ticks
+   * the system power timer and resets the auto power-down timer every minute.
    * @param {boolean} enabled
    */
   keepAwake: enabled => host().power.keepAwake(Boolean(enabled)),
@@ -490,3 +562,69 @@ export function acquireImage(uri, width, height, fit, prefetch, listener) {
   }
   return release;
 }
+
+/**
+ * A headless copy of the app that keeps running after the app closes (pandorad): the app's `daemon`
+ * entry (app.json) with the non-UI modules, serving HTTP on 127.0.0.1:9061. See docs/NATIVE-API.md.
+ */
+export const Daemon = Object.freeze({
+  /** Whether this build has a daemon: the app declares a `daemon` entry. */
+  get supported() { return host().daemon?.supported === true; },
+  /** True only inside the daemon. */
+  get isDaemon() { return host().daemon?.isDaemon === true; },
+  /** Inside the daemon `{token, stateDir, version}` from Daemon.start; null in the app.
+   * @returns {{token: string, stateDir: string, version: string} | null} */
+  get args() { return host().daemon?.args ?? null; },
+  /** Inside the daemon its process ID; null in the app. @returns {number | null} */
+  get pid() { return host().daemon?.pid ?? null; },
+  /** The loopback port the daemon serves on, in both processes: 9061 (on the desktop
+   * PS5_REACT_DAEMON_PORT may move it). @returns {number} */
+  get port() { return host().daemon?.port ?? 9061; },
+  /** App side: 32 hex characters from the system's random source, for the daemon's token; null where the
+   * host has none. @returns {string | null} */
+  randomToken: () => host().daemon?.randomToken?.() ?? null,
+  /**
+   * App side: starts the daemon unless one already answers, and resolves once it serves. Never rejects.
+   * @param {{token: string, stateDir: string}} options
+   * @returns {Promise<{ok: boolean, error?: string}>}
+   */
+  async start({token, stateDir} = {}) {
+    try {
+      const api = host().daemon;
+      if (!api?.start) throw new Error('Daemon.start: this host has no daemon support');
+      await networkTask(api.start(String(token ?? ''), String(stateDir ?? '')), 'Daemon.start', '', 'daemon').done;
+      return {ok: true};
+    } catch (error) {
+      return {ok: false, error: error?.message ?? String(error)};
+    }
+  },
+  /**
+   * Daemon side: listens on 127.0.0.1:9061 and calls `handler({method, path, query, headers, body})` for
+   * each request; it returns (or resolves) `{status, headers?, body?}` with a string body. Requests without
+   * the token are answered 401 before they reach it (except GET /hello and /i/...). A handler that throws
+   * answers 500.
+   * @param {(request: {method: string, path: string, query: Record<string, string>,
+   *   headers: Record<string, string>, body: string}) =>
+   *   {status: number, headers?: Record<string, string>, body?: string}
+   *   | Promise<{status: number, headers?: Record<string, string>, body?: string}>} handler
+   */
+  serve(handler) {
+    if (typeof handler !== 'function') throw new TypeError('Daemon.serve: expected a function');
+    const api = host().daemon;
+    if (!api?.serve) throw new Error('Daemon.serve: only the daemon serves');
+    api.serve((request, respond) => {
+      Promise.resolve().then(() => handler(request)).then(respond, error => {
+        console.error(`Daemon.serve: ${request.method} ${request.path} failed: ${error}${error?.stack ? `\n${error.stack}` : ''}`);
+        respond({status: 500, headers: {'content-type': 'application/json'},
+          body: JSON.stringify({error: {message: String(error?.message ?? error)}})});
+      });
+    });
+  },
+  /** Daemon side: finishes the responses already given, stops the native services, flushes the log and
+   * exits with `code`. @param {number} [code] */
+  exit(code = 0) {
+    const api = host().daemon;
+    if (!api?.exit) throw new Error('Daemon.exit: only the daemon exits this way; use BackHandler.exitApp');
+    api.exit(code);
+  },
+});

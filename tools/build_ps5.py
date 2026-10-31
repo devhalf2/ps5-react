@@ -16,6 +16,7 @@ import urllib.request
 import zipfile
 
 from rar_worker import build as build_rar_worker, unrar_source
+from build_daemon import build as build_daemon
 from common import resource_files, ROOT, DEPS, LOCK, run, digest, verify, fetch, app_files, bundle, dependency, stb_image
 from network_ports import ports, copy_notices
 from ca_bundle import ca_bundle
@@ -136,11 +137,12 @@ def main():
                ROOT / "native/ps5/filesystem_access.cpp",
                ROOT / "native/ps5/elevation_transport.cpp",
                ROOT / "native/shared/host_api.cpp", ROOT / "native/shared/removals.cpp", ROOT / "native/shared/network.cpp",
-               ROOT / "native/shared/network_api.cpp", ROOT / "native/shared/archives.cpp", ROOT / "native/shared/archive_preflight.cpp", ROOT / "native/shared/rar5_password.cpp", ROOT / "native/shared/archive_writer.cpp", ROOT / "native/shared/archive_api.cpp", ROOT / "native/shared/browser_capture_api.cpp", ROOT / "native/ps5/browser_capture.cpp", ROOT / "native/shared/package_api.cpp", ROOT / "native/ps5/package_installer.cpp", ROOT / "native/ps5/payload_loader.cpp", ROOT / "native/ps5/relaunch.cpp", ROOT / "native/ps5/crash_log.cpp", ROOT / "native/ps5/utf8_locale.cpp", ROOT / "native/ps5/network_platform.cpp",
+               ROOT / "native/shared/network_api.cpp", ROOT / "native/shared/archives.cpp", ROOT / "native/shared/archive_preflight.cpp", ROOT / "native/shared/rar5_password.cpp", ROOT / "native/shared/archive_writer.cpp", ROOT / "native/shared/archive_api.cpp", ROOT / "native/shared/browser_capture_api.cpp", ROOT / "native/ps5/browser_capture.cpp", ROOT / "native/shared/package_api.cpp", ROOT / "native/ps5/package_installer.cpp", ROOT / "native/ps5/payload_loader.cpp", ROOT / "native/shared/daemon_api.cpp", ROOT / "native/ps5/daemon_launcher.cpp", ROOT / "native/ps5/relaunch.cpp", ROOT / "native/ps5/crash_log.cpp", ROOT / "native/ps5/utf8_locale.cpp", ROOT / "native/ps5/network_platform.cpp",
                ROOT / "native/shared/image_loader.cpp", ROOT / "native/shared/image_api.cpp",
                ROOT / "native/shared/sound_api.cpp", generated / "sounds.generated.c",
                ROOT / "native/shared/gl_presenter.cpp", ROOT / "native/shared/shader_layers.cpp",
                ROOT / "native/shared/frame_stats.cpp", ROOT / "native/shared/js_heap.cpp", ROOT / "native/shared/js_profiler.cpp", ROOT / "native/shared/damage_tracker.cpp", ROOT / "native/shared/render_workers.cpp", ROOT / "native/shared/input_script.cpp", ROOT / "native/shared/screenshot.cpp", ROOT / "native/shared/text_shaper.cpp", generated / "assets.generated.c",
+               ROOT / "native/shared/system_state.cpp", ROOT / "native/shared/notifications_api.cpp", ROOT / "native/ps5/system_platform.cpp",
                bundle_c, *[hui / ("src/platform/ps5/" + n + ".cpp") for n in ("display_egl", "pad", "system", "audio_out")],
                hui / "src/core/input.cpp", hui / "src/audio/mixer.cpp", hui / "src/runtime/app_heap.c", hui / "src/runtime/runtime_shims.c",
                native / "app_crt.cpp", native / "app_cpp_runtime.cpp"]
@@ -214,6 +216,10 @@ def main():
          ROOT / "native/ps5/payloads/browser_capture.c", browser / "browser_platform.c",
          browser / "browser_scan.c", browser / "browser_match.c", browser / "browser_url.c", "-lkernel_sys"],
         env=env, log=BUILD / "browser-capture.log")
+    # The app's daemon, when it declares one: a payload that outlives the app (native/daemon).
+    daemon = build_daemon(BUILD / "pandorad.elf", sdk, env, hui, er, quickjs, generated,
+                          cross / "_deps/quickjs-build/libqjs.a", [archive_ports / "include"],
+                          [*network_libs, *archive_libs, builtins]) if config.get("daemon") else None
     if args.compile_only:
         print(f"PS5 ELF linked: {elf}; no application package generated")
         return
@@ -226,6 +232,8 @@ def main():
     run([sdk / "bin/prospero-strip", "-o", app / "rar-extract.elf", rar_extract], env=env)
     shutil.copy2(relauncher, app / "relauncher.elf")
     shutil.copy2(capture, app / "browser-capture.elf")
+    if daemon: run([sdk / "bin/prospero-strip", "-o", app / "pandorad.elf", daemon], env=env)
+    else: (app / "pandorad.elf").unlink(missing_ok=True)
     param = json.loads((hui / "sce_sys/param.json").read_text())
     if config.get("refreshRate", 60) == 120:
         param["attribute3"] = param.get("attribute3", 0) | 0x80040  # The console grants 120 Hz output only with these bits.
@@ -309,6 +317,8 @@ def main():
     receipts = {"title": TITLE, "app": app_dir.name, "framework_version": "0.1.0",
                 "hardware_tested": False, "dependencies": LOCK,
                 "config": config, "bundle_sha256": digest(generated / "app.bundle.js"),
+                **({"daemon": {"bundle_sha256": digest(generated / "daemon.bundle.js"),
+                               "elf_sha256": digest(app / "pandorad.elf")}} if daemon else {}),
                 "llvm_version": subprocess.check_output([llvm / "clang", "--version"], text=True).splitlines()[0],
                 "sdk_root": str(sdk),
                 "network_libraries": {p.name: digest(p) for p in network_libs},

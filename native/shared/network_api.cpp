@@ -165,7 +165,8 @@ JSValue begin(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv, bool d
     if (!string_option(ctx, options, "method", request.method, 16) ||
         !string_option(ctx, options, "body", request.body, 1024*1024) ||
         !number_option(ctx, options, "maxBytes", request.max_bytes, 1, 4*1024*1024) ||
-        !boolean_option(ctx, options, "followRedirects", request.follow_redirects))
+        !boolean_option(ctx, options, "followRedirects", request.follow_redirects) ||
+        !boolean_option(ctx, options, "retry", request.retry))
       return JS_ThrowTypeError(ctx, "%s: invalid method/body/maxBytes", call);
     if (request.method != "GET" && request.method != "HEAD" && request.method != "POST" && request.method != "PUT" &&
         request.method != "PATCH" && request.method != "DELETE")

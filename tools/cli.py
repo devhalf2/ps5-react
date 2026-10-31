@@ -35,14 +35,16 @@ def preview_env(app):
 
 def desktop(app, test=False, target="ps5-react-preview"):
     er = dependency("embeddedReact")
-    _, _, generated = bundle(app, er)
+    _, config, generated = bundle(app, er)
     build = ROOT / ".build" / app.name / "desktop"
     quickjs = dependency("quickjsSource")
     hui = dependency("platform")
     run(["cmake", "-S", ROOT / "native/desktop", "-B", build,
          f"-DER_ROOT={er}", f"-DHUI_ROOT={hui}", f"-DFETCHCONTENT_SOURCE_DIR_QUICKJS={quickjs}", f"-DAPP_GENERATED={generated}", f"-DSTB_IMAGE_DIR={stb_image()}", f"-DHB_ROOT={harfbuzz()}", f"-DSB_ROOT={sheenbidi()}", "-DCMAKE_BUILD_TYPE=Release"],
         log=build / "configure.log")
-    run(["cmake", "--build", build, "--target", target, "-j", "6"], log=build / "build.log")
+    # An app with a daemon entry also gets pandorad, which Daemon.start finds beside the preview.
+    targets = [target, *(["pandorad"] if "daemon" in config else [])]
+    run(["cmake", "--build", build, "--target", *targets, "-j", "6"], log=build / "build.log")
     # RAR sets extract in this separate program, which the preview finds beside itself.
     build_host(build / "rar-extract")
     command = [build / "ps5-react-preview", generated / "app.bundle.js"]
@@ -63,6 +65,8 @@ def desktop(app, test=False, target="ps5-react-preview"):
         run(["python3", ROOT / "tools/test_text.py"], log=ROOT / ".build/text-test.log")
         run(["python3", ROOT / "tools/test_browser_capture.py"], log=ROOT / ".build/browser-capture-test.log")
         run(["python3", ROOT / "tools/test_sce_art.py"], log=ROOT / ".build/sce-art-test.log")
+        run(["python3", ROOT / "tools/test_daemon.py"], log=ROOT / ".build/daemon-test.log")
+        run(["python3", ROOT / "tools/test_spike_pkg_url.py"], log=ROOT / ".build/spike-pkg-url-test.log")
         command.append("--self-test")
     return command, build
 

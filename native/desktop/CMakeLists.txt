@@ -41,7 +41,7 @@ target_compile_options(sheenbidi PRIVATE -w)
 target_include_directories(sheenbidi PUBLIC "${SB_ROOT}/Headers" PRIVATE "${SB_ROOT}/Source")
 # Same engine options on desktop and PS5, rather than the upstream demo's profile.
 add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../ps5" runtime)
-add_executable(ps5-react-preview host.cpp host_platform.cpp network_platform.cpp ../shared/network.cpp ../shared/network_api.cpp ../shared/archives.cpp ../shared/archive_writer.cpp rar_worker_process.cpp ../shared/archive_preflight.cpp ../shared/rar5_password.cpp ../shared/archive_api.cpp ../shared/package_api.cpp package_installer.cpp ../shared/browser_capture_api.cpp browser_capture.cpp ../shared/image_loader.cpp ../shared/image_api.cpp ../shared/sound_api.cpp ../shared/host_api.cpp ../shared/removals.cpp "${HUI_ROOT}/src/audio/mixer.cpp" ../shared/gl_presenter.cpp ../shared/shader_layers.cpp ../shared/frame_stats.cpp ../shared/js_heap.cpp ../shared/js_profiler.cpp ../shared/damage_tracker.cpp ../shared/render_workers.cpp ../shared/input_script.cpp ../shared/screenshot.cpp ../shared/text_shaper.cpp control.cpp "${APP_GENERATED}/assets.generated.c" "${APP_GENERATED}/sounds.generated.c")
+add_executable(ps5-react-preview host.cpp host_platform.cpp network_platform.cpp ../shared/network.cpp ../shared/network_api.cpp ../shared/archives.cpp ../shared/archive_writer.cpp rar_worker_process.cpp ../shared/archive_preflight.cpp ../shared/rar5_password.cpp ../shared/archive_api.cpp ../shared/package_api.cpp package_installer.cpp ../shared/browser_capture_api.cpp browser_capture.cpp ../shared/image_loader.cpp ../shared/image_api.cpp ../shared/sound_api.cpp ../shared/host_api.cpp ../shared/removals.cpp "${HUI_ROOT}/src/audio/mixer.cpp" ../shared/gl_presenter.cpp ../shared/shader_layers.cpp ../shared/frame_stats.cpp ../shared/js_heap.cpp ../shared/js_profiler.cpp ../shared/damage_tracker.cpp ../shared/render_workers.cpp ../shared/input_script.cpp ../shared/screenshot.cpp ../shared/text_shaper.cpp ../shared/system_state.cpp ../shared/notifications_api.cpp system_platform.cpp control.cpp ../shared/daemon_api.cpp daemon_launcher.cpp "${APP_GENERATED}/assets.generated.c" "${APP_GENERATED}/sounds.generated.c")
 target_compile_features(ps5-react-preview PRIVATE cxx_std_20)
 target_compile_options(ps5-react-preview PRIVATE -Wall -Wextra -Werror)
 target_include_directories(ps5-react-preview PRIVATE ../shared "${APP_GENERATED}" "${STB_IMAGE_DIR}" "${HUI_ROOT}/src" "${ER_ROOT}/engine/text")
@@ -57,3 +57,13 @@ target_compile_features(ps5-react-text-test PRIVATE cxx_std_20)
 target_compile_options(ps5-react-text-test PRIVATE -Wall -Wextra -Werror)
 target_include_directories(ps5-react-text-test PRIVATE ../shared "${APP_GENERATED}" "${ER_ROOT}/engine/text")
 target_link_libraries(ps5-react-text-test PRIVATE er-bridge-quickjs harfbuzz sheenbidi)
+# pandorad, the app's daemon (native/daemon): its script with the native modules that need no window, GL,
+# input or sound. Built when the app declares a daemon entry, which the bundle step writes as C.
+if(EXISTS "${APP_GENERATED}/daemon_bundle.c")
+  add_executable(pandorad ../daemon/main.cpp ../daemon/js_runtime.cpp ../daemon/http_server.cpp ../daemon/headless.cpp ../daemon/archive_hooks.cpp ../daemon/desktop.cpp host_platform.cpp network_platform.cpp rar_worker_process.cpp package_installer.cpp ../shared/host_api.cpp ../shared/removals.cpp ../shared/network.cpp ../shared/network_api.cpp ../shared/archives.cpp ../shared/archive_writer.cpp ../shared/archive_preflight.cpp ../shared/rar5_password.cpp ../shared/archive_api.cpp ../shared/package_api.cpp ../shared/system_state.cpp ../shared/notifications_api.cpp system_platform.cpp "${HUI_ROOT}/src/audio/mixer.cpp" "${APP_GENERATED}/daemon_bundle.c")
+  target_compile_features(pandorad PRIVATE cxx_std_20)
+  target_compile_options(pandorad PRIVATE -Wall -Wextra -Werror)
+  target_include_directories(pandorad PRIVATE ../shared ../daemon "${APP_GENERATED}" "${HUI_ROOT}/src" "${ER_ROOT}/bridges/quickjs")
+  # host_platform.cpp is the preview's, SDL calls included; SDL is linked for them but never initialized.
+  target_link_libraries(pandorad PRIVATE SDL2::SDL2 CURL::libcurl Threads::Threads LibArchive::LibArchive LibLZMA::LibLZMA OpenSSL::Crypto ZLIB::ZLIB qjs)
+endif()

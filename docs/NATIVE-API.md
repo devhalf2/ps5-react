@@ -17,7 +17,7 @@ Controller.setLightBar('#38bdf8');
 ## Contract
 
 The modules in `runtime/js/native.js` wrap `globalThis.__ps5ReactNative`, which
-each host installs before the bundle runs. Its exact shape (ABI v10) is
+each host installs before the bundle runs. Its exact shape (ABI v11) is
 documented in [`native/shared/host_api.hpp`](../native/shared/host_api.hpp).
 `native/shared/host_api.cpp` implements the filesystem with POSIX and the object
 itself; `native/ps5/` and `native/desktop/` implement the platform functions.
@@ -146,6 +146,9 @@ calls retain their normal permission errors rather than returning fake values.
 `Http.request(url, options)` provides bounded text/JSON HTTP responses, effective
 URLs and allowlisted lowercase response headers. Set `followRedirects: false`
 to inspect redirect metadata; cookies and authentication headers stay private.
+A request that fails to connect or gets 5xx/429 is retried with backoff (up to
+eight attempts); `retry: false` fails it at once, for a caller asking whether
+something listens (a refused loopback port).
 HTTP requests accept a custom `Range` header for bounded probes; downloads own
 their ranges and reject it. Custom headers disable automatic redirects. Response
 headers include `etag` and `last-modified` for stable file identity checks.
@@ -184,6 +187,31 @@ ScrollViews call while they move to hold network requests back) is internal to t
 returns `true` when the host accepted it.
 On PS5 it uses libkernel's `sceKernelSendNotificationRequest`: a plain toast whose
 subMessage follows the message on a second line.
+
+`Notifications.send({id, title, body?, icon?, kind?})` (ABI v11) shows a rich
+toast in the system's Downloads channel and returns `true` when the system call
+returned success (not yet seen on a console; see [HARDWARE.md](HARDWARE.md)).
+A later `send` with the same `id` replaces the toast instead of stacking a new
+one, so a job can post its start, completion and failure under one id.
+
+| Field | Notes |
+| --- | --- |
+| `id` | Non-empty string; letters, digits, `_` and `-` are kept, others become `_`, and only the first 48 count |
+| `title` | The toast's first line |
+| `body` | Optional second line |
+| `icon` | Optional app path (`/download0/icons/PPSA01234.png`, resolved to the console path) or http(s) URL |
+| `kind` | `'info'` (default), `'done'`, `'failed'` or `'attention'`; without an `icon`, `'failed'` and `'attention'` show the system's caution icon, the others its download icon |
+
+On PS5 it sends `sceNotificationSend(0xFE, true, json)` (the payload SDK's
+`samples/notify`), with `viewTemplateType` `InteractiveToastTemplateB`,
+`channelType` `Downloads`, `toastOverwriteType` `Always` and a `bundleName` of
+`ps5react_<TITLE_ID>_<id>`, the key the system's overlay replaces toasts by
+([ShadowMountPlus TOASTS.md](https://github.com/drakmor/ShadowMountPlus/blob/1.7/TOASTS.md)).
+`sceNotificationSend` is looked up in `libSceNotification.sprx` at run time;
+when that fails or the call returns an error, `send` falls back to
+`show(title, body)`. An unknown `kind` or an `icon` path outside the app's paths
+throws, naming the id. **Not yet validated on hardware**, from a title or from a
+payload: neither the toast nor the replacement has been seen on a console.
 
 ## Users
 
@@ -293,6 +321,78 @@ homebrew use). The desktop preview disables or enables the SDL screen saver and
 prints `[power] keep awake on|off`. **Not yet validated on hardware**: no test
 has shown a console staying awake through its rest-mode timeout.
 
+While it is on, the PS5 host also calls `sceShellCoreUtilResetAutoPowerDownTimer`
+once a minute (what the system's installer screen does during an install), from
+the console-state watcher thread of [System](#system-abi-v11), so the reset keeps
+going while the render loop is throttled. The call is looked up in
+`libSceSystemService.sprx` at run time; the log records whether it was found and
+its first result. Unvalidated on hardware like the tick.
+
+## System (ABI v11)
+
+`System` reports the console's state to an app, or to a background process
+built on this engine:
+
+```js
+import {System} from '@ps5-react/core';
+
+const unsubscribe = System.onStateChange(({state, at, source, titleId}) => {
+  if (state === 'sleeping') queue.pause();
+  if (state === 'resumed') queue.revalidateAndResume();
+});
+const game = System.runningGame(); // {titleId: 'PPSA01234'} | null
+```
+
+| Call | Notes |
+| --- | --- |
+| `System.onStateChange(listener)` | Calls `listener` on the JavaScript thread for each change after the call; returns the function that unsubscribes. Polls the host every 500 ms while a listener is subscribed. |
+| `System.runningGame()` | `{titleId}` of the game running beside the app as last checked, or `null`. |
+| `System.simulate(state, {titleId}?)` | Test hook: reports a state as the console would, to listeners and to the native services. |
+
+An event is `{state, at, source, titleId?, pausedMs?}`: `state` is
+`'sleeping'`, `'resumed'`, `'game-started'` or `'game-ended'`; `at` is
+milliseconds since the Unix epoch; `titleId` names the game of `game-started`
+and `game-ended`.
+
+A native thread (`native/shared/system_state.cpp`) watches once a second, with
+an explicit 512 KiB stack, so Sony calls never run on the render thread. Each
+`source` is one way the state is learned:
+
+| `source` | Reports | PS5 | Desktop |
+| --- | --- | --- | --- |
+| `event` | `sleeping`, `resumed` | `sceSystemServiceReceiveEvent`: `BEFORE_SLEEP` (0x10000001), `ON_RESUME` (0x10000000), as ezRemote Server reads them | — |
+| `state-flag` | `sleeping`, `resumed` | The `SceSystemStateMgrInfo` event flag (`sceKernelOpenEventFlag`/`sceKernelPollEventFlag`), as ShadowMountPlus reads it: `SUSPEND_ON_GOING` (300) or `MAIN_ON_STANDBY` (500) is sleeping, a return to `WORKING` (1000) a resume | — |
+| `sigcont` | `resumed` | `SIGCONT`, which PKG Manager treats as the end of standby | `kill -CONT` |
+| `gap` | `resumed`, with `pausedMs` | The watcher ran more than 10 s late by the monotonic or the wall clock (`network.cpp` uses the same rule) | The Mac's sleep, `kill -STOP` |
+| `game-poll` | `game-started`, `game-ended` | Every 3 s: `sceSystemServiceGetAppIdOfRunningBigApp`, then `sceSystemServiceGetAppTitleId` | — |
+| `simulated` | any | `System.simulate` | `System.simulate`, or `ps5_drive.py system <state> [titleId]` |
+
+A sleep is reported once until the next resume, and a resume reported by
+several sources within 15 seconds arrives once, from the first. A gap also
+follows a game in front throttling background threads (a `sleep(5)` has
+overrun 60 s there), so a `gap` resume does not prove rest mode. A process
+frozen in rest mode receives `sleeping` and `resumed` only once it runs again.
+
+`runningGame()` is the running big application other than this app, skipping
+system applications (`NPXS…`): a game in the background of the home screen
+still counts. It relies on the two `sceSystemService` calls etaHEN makes from
+ShellUI, looked up in `libSceSystemService.sprx` at run time. **Unverified**:
+whether a title or a payload may make them, and what they answer, needs a
+console (spike B7 of the background-downloads plan). Within an app it is `null`
+while the app itself is in front.
+
+Native services read the same state without JavaScript, from any thread:
+`system_state::suspended()` (between a sleep and the next resume),
+`system_state::game_running()` and `system_state::resumed_at_us()` (monotonic
+time of the last resume). `native/shared/system_state.hpp` declares them with
+the platform probes; a host installs `__ps5ReactNative.system` and calls
+`system_state::stop()` on exit. The network and archive services do not use
+them yet.
+
+**Not yet validated on hardware**: no PS5 has delivered any of these events to
+this engine. The log names each Sony call's first result
+(`system: sceSystemServiceReceiveEvent=0x…`) and every state-flag change.
+
 ## Fonts
 
 `Fonts.setLanguage(tag)` sets the interface language (a BCP 47 tag such as
@@ -324,6 +424,10 @@ desktop preview runs itself again.
   root. Unlike the console, `/app0` is writable on desktop; do not rely on it.
 - `mounts()` lists the Mac's mounted filesystems.
 - `Notifications.show` prints `[notify] message: subMessage` to the terminal.
+- `Notifications.send` prints `[notify] title: body`, as `show` does, and returns `true`.
+- `System` reports no console states of its own: `SIGCONT` and gaps (the Mac's
+  sleep) still arrive, and `System.simulate` or `ps5_drive.py system <state>`
+  feeds the rest. `runningGame()` is `null` unless simulated.
 - `Users` reports the macOS user (`$USER`) with id `1`.
 - Temperatures are `null`; `cpuFrequency` is `null` on Apple silicon.
 - `language` comes from `PS5_REACT_LANGUAGE`, else `LC_ALL`, `LC_MESSAGES` or
@@ -350,7 +454,9 @@ title can load these modules; when one cannot, only the dependent call degrades:
 | --- | --- | --- |
 | `DeviceInfo.get().model` | `libkernel_sys.sprx`, `libkernel.sprx` or `libkernel_web.sprx` | `null` |
 | `DeviceInfo.get().consoleId` | The same, else the `machdep.openpsid` sysctl | `null` |
-| `Notifications.show()` | `libSceNotification.sprx` | Returns `false` |
+| `Notifications.send()` | `libSceNotification.sprx` | Falls back to `Notifications.show()` |
+| `Power.keepAwake()` timer reset | `libSceSystemService.sprx` | Only the power tick runs |
+| `System.runningGame()` | `libSceSystemService.sprx` | `null`, and no game events |
 
 PS5 `diskUsage()` uses the native-title `_fstatfs` export on a descriptor opened
 with `sceKernelOpen`. `mounts()` discovers kernel-provided records through
@@ -592,3 +698,100 @@ Native shape: `browser.capture(prefix, suffix, timeoutSeconds)` returns a task
 ID; `browser.cancel(id)` requests cancellation; `browser.poll()` consumes
 terminal results. Calls submit/poll synchronously on the render thread; all
 payload transport runs on the worker.
+
+## Daemon (ABI v11)
+
+A daemon is a second, headless script of the app that keeps running after the
+app closes: Pandora's download queue goes on while a game runs. The app declares
+it in `app.json` and starts it; the daemon serves HTTP on `127.0.0.1:9061`, which
+the app reaches with `Http.request`.
+
+```json
+{"daemon": "daemon/main.js", "networking": true, "filesystemAccess": "console"}
+```
+
+```js
+// daemon/main.js: no JSX, no UI.
+import {Daemon} from '@ps5-react/core';
+const {token, stateDir, version} = Daemon.args;
+Daemon.serve(async ({method, path, query, headers, body}) => {
+  if (path === '/hello') return {status: 200, body: JSON.stringify({protocol: 1, version})};
+  if (path === '/shutdown') { setTimeout(() => Daemon.exit(0), 0); return {status: 200, body: '{}'}; }
+  return {status: 404, body: '{}'};
+});
+
+// The app.
+const {ok, error} = await Daemon.start({token, stateDir: '/data/ps5-react/PPSA99060/queue'});
+const hello = await Http.request('http://127.0.0.1:9061/hello');
+```
+
+| Member | Where | Notes |
+| --- | --- | --- |
+| `Daemon.supported` | both | The app declares a `daemon` entry |
+| `Daemon.isDaemon` | both | True only inside the daemon |
+| `Daemon.args` | daemon | `{token, stateDir, version}` from `Daemon.start`; `null` in the app |
+| `Daemon.pid` | daemon | The daemon's process ID (for `/hello` and the owner lock); `null` in the app |
+| `Daemon.randomToken()` | app | 32 hex characters from the system's random source for the token; `null` without one |
+| `Daemon.port` | both | The loopback port it serves on: 9061, or `PS5_REACT_DAEMON_PORT` on the desktop |
+| `Daemon.start({token, stateDir})` | app | `Promise<{ok, error?}>`; never rejects |
+| `Daemon.serve(handler)` | daemon | Answers each request with what `handler` returns or resolves |
+| `Daemon.exit(code)` | daemon | Answers what is pending, stops the native services, then lets go of the port (a refused connection means no transfer of it still writes), flushes the log, exits |
+
+**Build.** The build bundles the entry with `@ps5-react/core` resolving to the
+modules a daemon can use (`runtime/js/headless.js`): `Downloads`, `Http`,
+`FileSystem`, `DownloadFormats`, `Archives`, `Packages`, `Notifications`,
+`Power`, `Platform`, `DeviceInfo`, `System` and `Daemon`, plus timers and `console`.
+Importing a UI module or `Linking`/`BrowserCapture` fails the build. It runs in
+`pandorad`, a host with QuickJS and those native modules and no window, GL,
+input or sound: `pandorad.elf` in the PS5 app folder, a `pandorad` program
+beside the desktop preview. Its JavaScript runtime has the app's globals (no
+`Date` objects) and a 32 MiB heap; timers run on the system clock.
+The daemon requires `networking` and `filesystemAccess: "console"`.
+
+**Start.** `Daemon.start` sends the daemon `PDD1\n<token>\n<stateDir>\n<version>\n`
+(`version` is `app.json`'s) and resolves once it answers `ready`, within 10 s.
+When the port is already taken the new daemon answers `busy` and exits with code
+3; the start then succeeds if `GET /hello` answers 200. The token is one line of
+at most 128 characters and `stateDir` an absolute path.
+
+- PS5: the engine first copies `rar-extract.elf` and `pkg-installer.elf` from the
+  app folder to `/data/ps5-react/<TITLE>/bin/` (SHA-256 checked, through a
+  temporary file), then sends `pandorad.elf` to the payload loader on
+  `127.0.0.1:9021`, like the other payloads. As the loader's child it outlives
+  the app. It needs console filesystem access.
+- Desktop: the preview spawns `pandorad` in a session of its own (`setsid`), so
+  closing the preview leaves it running. `PS5_REACT_DAEMON_PORT` moves the
+  preview's daemon off 9061, for tests beside other programs; `Daemon.port`
+  tells the app where to reach it.
+
+**Serving.** The first request waits until the script calls `Daemon.serve`; the
+port is bound before the script runs, so a second daemon leaves before any of
+its script runs. Each request reaches the handler on the script's thread as
+`{method, path, query, headers, body}`: `path` as sent, `query` its decoded
+parameters as an object, `headers` with lowercase names, `body` a string. The
+handler returns `{status, headers?, body?}` (status 200-599, a string body);
+framing headers are the server's. A handler that throws or returns anything else
+answers 500, and the error goes to the log. The server answers by itself:
+
+- 401 when `x-pandora-token` differs from `Daemon.args.token`, except `GET /hello`
+  and paths under `/i/`;
+- 413 for a body over 1 MiB (`Expect: 100-continue` is honored), 501 for chunked
+  bodies, 431 for a request head over 16 KiB;
+- 503 to a ninth concurrent connection. Connections are kept alive and dropped
+  after a minute idle.
+
+**Paths and log.** On PS5 the app's sandbox mounts go away when it closes, so in
+the daemon `/download0` (`FileSystem.dataDir`) is `/data/ps5-react/<TITLE>`,
+`/temp0` and `/cache0` are its `tmp` and `cache` folders, and `/app0` is refused;
+other absolute paths are used as they are. Keep shared state on `/data` (an
+absolute `stateDir`). The daemon starts workers from `<FileSystem.dataDir>/bin`.
+On the desktop the paths resolve in the preview's sandbox. Console lines,
+uncaught errors and the native log go to `<FileSystem.dataDir>/daemon.log`; the
+previous run's is kept as `daemon.prev.log`, and a log that reaches 8 MiB is
+rotated the same way, so the daemon keeps logging. Sleep, resume and the running
+game reach the daemon through [System](#system-abi-v11), as in the app.
+
+**Not yet available:** the `/i/` range server for the console's installer
+(E6), and idle exit, which the script decides with
+`Daemon.exit`. Nothing of the daemon has run on a console yet
+([HARDWARE.md](HARDWARE.md)).

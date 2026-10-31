@@ -121,7 +121,7 @@ Its UI components, themes, and UI renderer are not used.
 | --- | --- |
 | `apps/` | Independent JSX entry points, manifests, and assets |
 | `runtime/js/` | Public primitives, focus navigation, native modules, and host input contract |
-| `native/` | Shared presenter and desktop/PS5 hosts |
+| `native/` | Shared presenter, desktop/PS5 hosts, and `native/daemon` (pandorad, the headless host of an app's daemon) |
 | `tools/` | Bootstrap, bundle, `className` compiler, assets, builds, verification, CLI |
 | `docs/` | Decisions, evidence, limitations, provenance |
 

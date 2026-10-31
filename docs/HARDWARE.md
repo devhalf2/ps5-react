@@ -272,6 +272,12 @@ screens, except that on return to Home the branch keeps the scrolled row.
 - Home-screen backgrounds from `sce_sys/pic0.dds` and `pic1.dds` (3840×2160 BC7,
   the header snes9xPS5 and PS5_Ghostship ship): the build copies them and
   verify checks them, but no console has been observed showing them.
+- `Notifications.send` (ABI v11, `sceNotificationSend` looked up at run time): its `true` only means
+  the call returned 0. No console has been observed showing the rich toast, replacing it by `id`, or
+  showing its icon; until one has, a `true` is not proof the person saw anything.
+- `System` (ABI v11): rest-mode and resume events, the `SceSystemStateMgrInfo` flag, the running-game
+  queries and `sceShellCoreUtilResetAutoPowerDownTimer` have not run on a console.
+- `pandorad.elf` (the app's daemon): not yet started from the payload loader on a console.
 
 ## Remote images — 2026-10-06
 

@@ -3,7 +3,7 @@
 // Additional attribution term: see LICENSE-ATTRIBUTION.
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import {acquireImage, Archives, BrowserCapture, Downloads, FileSystem, Http, Power, Sound} from './native.js';
+import {acquireImage, Archives, BrowserCapture, Daemon, Downloads, FileSystem, Http, Notifications, Power, Sound, System} from './native.js';
 import {setFrameBatcher} from './frame.js';
 
 test('native network tasks deliver progress, release listeners and stop polling', async () => {
@@ -292,6 +292,141 @@ test('browser capture delivers only its result and cancellation rejects as Abort
     await assert.rejects(second.done, {name: 'AbortError'});
   } finally {
     globalThis.setInterval = originalInterval; globalThis.clearInterval = originalClear;
+    delete globalThis.__ps5ReactNative;
+  }
+});
+
+test('System delivers state changes on its own timer and stops polling with the last listener', () => {
+  let tick = null;
+  let clears = 0;
+  let queued = [{state: 'sleeping', at: 1, source: 'event'}];
+  const originalInterval = globalThis.setInterval;
+  const originalClear = globalThis.clearInterval;
+  const originalError = console.error;
+  globalThis.setInterval = (callback, ms) => { assert.equal(ms, 500); tick = callback; return 7; };
+  globalThis.clearInterval = id => { assert.equal(id, 7); clears++; tick = null; };
+  const simulated = [];
+  globalThis.__ps5ReactNative = {system: {
+    poll: () => { const events = queued; queued = []; return events; },
+    runningGame: () => ({titleId: 'PPSA01234'}),
+    simulate: (state, titleId) => { simulated.push([state, titleId]); return true; },
+  }};
+  try {
+    assert.throws(() => System.onStateChange(null), /System.onStateChange: expected a function/);
+    const first = [];
+    const second = [];
+    const unsubscribeFirst = System.onStateChange(event => first.push(event));
+    const unsubscribeSecond = System.onStateChange(event => { second.push(event.state); throw new Error('listener'); });
+    assert.equal(queued.length, 0, 'changes from before the first listener are dropped');
+    queued = [{state: 'resumed', at: 2, source: 'gap', pausedMs: 61000},
+      {state: 'game-started', at: 3, source: 'game-poll', titleId: 'PPSA01234'}];
+    const errors = [];
+    console.error = (...args) => errors.push(args[0]);
+    tick();
+    assert.deepEqual(first.map(event => event.state), ['resumed', 'game-started']);
+    assert.equal(first[0].pausedMs, 61000);
+    assert.equal(Object.isFrozen(first[1]), true);
+    assert.deepEqual(second, ['resumed', 'game-started']);
+    assert.equal(errors.length, 2);
+    unsubscribeFirst();
+    unsubscribeFirst();
+    assert.equal(clears, 0);
+    unsubscribeSecond();
+    assert.equal(clears, 1);
+    assert.deepEqual(System.runningGame(), {titleId: 'PPSA01234'});
+    assert.equal(System.simulate('game-started', {titleId: 'PPSA05678'}), true);
+    System.simulate('sleeping');
+    assert.deepEqual(simulated, [['game-started', 'PPSA05678'], ['sleeping', '']]);
+  } finally {
+    globalThis.setInterval = originalInterval;
+    globalThis.clearInterval = originalClear;
+    console.error = originalError;
+    delete globalThis.__ps5ReactNative;
+  }
+});
+
+test('Daemon.start resolves ok or the reason, never rejects, and reads the host flags', async () => {
+  const originalInterval = globalThis.setInterval, originalClear = globalThis.clearInterval;
+  let tick;
+  let snapshots = [];
+  const starts = [];
+  globalThis.setInterval = callback => { tick = callback; return 1; };
+  globalThis.clearInterval = () => {};
+  globalThis.__ps5ReactNative = {daemon: {supported: true, isDaemon: false, args: null,
+    start: (token, stateDir) => { starts.push([token, stateDir]); return starts.length; }, poll: () => snapshots, cancel() {}}};
+  try {
+    assert.deepEqual([Daemon.supported, Daemon.isDaemon, Daemon.args, Daemon.pid, Daemon.port], [true, false, null, null, 9061]);
+    assert.equal(Daemon.randomToken(), null, 'a host without a random source gives null');
+    globalThis.__ps5ReactNative.daemon.randomToken = () => 'ab'.repeat(16);
+    assert.equal(Daemon.randomToken(), 'ab'.repeat(16));
+    const ready = Daemon.start({token: 'a'.repeat(32), stateDir: '/data/queue'});
+    await Promise.resolve();
+    snapshots = [{id: 1, state: 'completed', error: ''}];
+    tick();
+    assert.deepEqual(await ready, {ok: true});
+    const refused = Daemon.start({token: 'a'.repeat(32), stateDir: '/data/queue'});
+    await Promise.resolve();
+    snapshots = [{id: 2, state: 'failed', error: 'pandorad was not ready within 10 s; see daemon.log'}];
+    tick();
+    assert.deepEqual(await refused, {ok: false, error: 'Daemon.start: pandorad was not ready within 10 s; see daemon.log'});
+    assert.deepEqual(starts, [['a'.repeat(32), '/data/queue'], ['a'.repeat(32), '/data/queue']]);
+    globalThis.__ps5ReactNative.daemon.start = () => { throw new TypeError('Daemon.start: stateDir must be an absolute path'); };
+    assert.deepEqual(await Daemon.start({token: 'x', stateDir: 'relative'}),
+      {ok: false, error: 'Daemon.start: stateDir must be an absolute path'});
+    globalThis.__ps5ReactNative = {};
+    assert.equal(Daemon.supported, false);
+    assert.equal((await Daemon.start({token: 'x', stateDir: '/data'})).ok, false);
+    assert.throws(() => Daemon.serve(() => ({status: 200})), /only the daemon serves/);
+    assert.throws(() => Daemon.exit(0), /only the daemon exits/);
+  } finally {
+    globalThis.setInterval = originalInterval; globalThis.clearInterval = originalClear;
+    delete globalThis.__ps5ReactNative;
+  }
+});
+
+test('Daemon.serve hands each request to the handler and answers what it returns, or 500 when it throws', async () => {
+  let callback;
+  const answers = [];
+  const originalError = console.error;
+  console.error = () => {};
+  globalThis.__ps5ReactNative = {daemon: {supported: true, isDaemon: true, args: {token: 't', stateDir: '/s', version: '1'}, pid: 4321, port: 19061,
+    serve: handler => { callback = handler; }, exit() {}}};
+  try {
+    assert.throws(() => Daemon.serve('handler'), TypeError);
+    Daemon.serve(async request => {
+      if (request.path === '/throw') throw new Error('broken');
+      if (request.path === '/sync') return {status: 202, body: 'sync'};
+      return {status: 200, body: JSON.stringify(request.query)};
+    });
+    const settle = () => new Promise(resolve => setTimeout(resolve, 0));
+    for (const path of ['/ok', '/sync', '/throw'])
+      callback({method: 'GET', path, query: {a: '1'}, headers: {}, body: ''}, response => answers.push([path, response]));
+    await settle();
+    assert.deepEqual(answers.map(([path, response]) => [path, response.status]), [['/ok', 200], ['/sync', 202], ['/throw', 500]]);
+    assert.equal(answers[0][1].body, '{"a":"1"}');
+    assert.match(answers[2][1].body, /broken/);
+    assert.deepEqual(Daemon.args, {token: 't', stateDir: '/s', version: '1'});
+    assert.equal(Daemon.pid, 4321);
+    assert.equal(Daemon.port, 19061);
+    assert.equal(Daemon.isDaemon, true);
+  } finally {
+    console.error = originalError;
+    delete globalThis.__ps5ReactNative;
+  }
+});
+
+test('Notifications.send passes a rich toast to the host with defaults and checks id and title', () => {
+  const sent = [];
+  globalThis.__ps5ReactNative = {notifications: {send: (...args) => { sent.push(args); return true; }},
+    notify: () => assert.fail('show is a separate call')};
+  try {
+    assert.equal(Notifications.send({id: 'job-1', title: 'Downloading', body: 'Astro Bot', icon: '/download0/icons/a.png'}), true);
+    Notifications.send({id: 'job-1', title: 'Installed', kind: 'done'});
+    assert.deepEqual(sent, [['job-1', 'Downloading', 'Astro Bot', '/download0/icons/a.png', 'info'],
+      ['job-1', 'Installed', '', '', 'done']]);
+    assert.throws(() => Notifications.send({title: 'x'}), /Notifications.send: id must be a non-empty string/);
+    assert.throws(() => Notifications.send({id: 'job-2'}), /Notifications.send job-2: title must be a string/);
+  } finally {
     delete globalThis.__ps5ReactNative;
   }
 });

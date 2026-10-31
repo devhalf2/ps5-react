@@ -16,6 +16,8 @@
   ps5_drive.py shot <path.bmp>          the frame on screen, 960×540
   ps5_drive.py logs                     output printed since the last call
   ps5_drive.py wait <ms>                return after that many milliseconds of frames
+  ps5_drive.py system <state> [titleId] report a console state to System.onStateChange: sleeping,
+                                        resumed, game-started (with a title ID) or game-ended
   ps5_drive.py stop
 """
 import fcntl
