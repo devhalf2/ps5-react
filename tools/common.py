@@ -173,6 +173,7 @@ def app_config(app, config=None):
     if config.get("networking") and config.get("filesystemAccess", "sandbox") != "console":
         raise ValueError('networking requires filesystemAccess: "console" for the PS5 native transport')
     resource_files(app, config)
+    daemon_entry(app, config)
     from text_fonts import SCRIPTS
     fonts = config.get("textFonts", [])
     if not isinstance(fonts, list) or len(set(fonts)) != len(fonts) or not set(fonts) <= SCRIPTS.keys():
@@ -183,6 +184,20 @@ def app_config(app, config=None):
     return app, config
 
 
+def daemon_entry(app, config):
+    """The app's daemon script (docs/NATIVE-API.md, Daemon), or None when it declares none."""
+    entry = config.get("daemon")
+    if entry is None: return None
+    if not isinstance(entry, str) or not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_./-]*\.(js|mjs|jsx)", entry) or \
+            any(part in ("", ".", "..") for part in entry.split("/")):
+        raise ValueError('daemon must be a relative path to a .js, .mjs or .jsx file, such as "daemon/main.js"')
+    if not (app / entry).is_file(): raise ValueError(f"Missing daemon entry: {entry}")
+    if config.get("filesystemAccess", "sandbox") != "console" or not config.get("networking"):
+        raise ValueError('daemon requires networking: true and filesystemAccess: "console": it downloads after the app '
+                         "closes, from the title's folder on /data")
+    return app / entry
+
+
 def generated_config(config, directory):
     directory.mkdir(parents=True, exist_ok=True)
     definitions = {"WIDTH": config["render"]["width"], "HEIGHT": config["render"]["height"],
@@ -190,7 +205,8 @@ def generated_config(config, directory):
                    "TIMEOUT": config["timeoutSeconds"], "REFRESH_RATE": config.get("refreshRate", 60),
                    "NAME": config["name"], "TITLE": config["titleId"],
                    "CONSOLE_FILESYSTEM": int(config.get("filesystemAccess", "sandbox") == "console"),
-                   "NETWORKING": int(config.get("networking", False))}
+                   "NETWORKING": int(config.get("networking", False)),
+                   "VERSION": config["version"], "DAEMON": int("daemon" in config)}
     (directory / "app_config.hpp").write_text("#pragma once\n" + "".join(
         f"#define PS5_REACT_{key} {json.dumps(value)}\n" for key, value in definitions.items()))
 
@@ -203,6 +219,24 @@ def bundle(app, er):
     if not (package / "node_modules").exists():
         run(["npm", "ci", "--omit=optional"], cwd=package, log=ROOT / ".build/npm-upstream.log")
     run(["node", ROOT / "tools/bundle.mjs", er, app, output], log=output.parent / "bundle.log")
+    daemon_bundle(app, config, er, output)
     from text_fonts import text_fonts
     text_fonts(config, output / "fonts")
     return app, config, output
+
+
+def daemon_bundle(app, config, er, output):
+    """Bundles the app's daemon entry into daemon.bundle.js and daemon_bundle.c, which pandorad embeds;
+    without one, removes them so no stale daemon is built."""
+    script, source = output / "daemon.bundle.js", output / "daemon_bundle.c"
+    entry = daemon_entry(app, config)
+    if entry is None:
+        script.unlink(missing_ok=True)
+        source.unlink(missing_ok=True)
+        return None
+    run(["node", ROOT / "tools/bundle_daemon.mjs", er, entry, script], log=output.parent / "daemon-bundle.log")
+    data = script.read_bytes()
+    text = ("const char pandorad_bundle[] = {" + ",".join(map(str, data)) + ",0};\n"
+            f"const unsigned long pandorad_bundle_length = {len(data)};\n")
+    if not source.exists() or source.read_text() != text: source.write_text(text)
+    return script

@@ -1,8 +1,24 @@
 # Changelog
 
-## Unreleased — console states, rich toasts, auto power-down reset
+## Unreleased — background daemon, console states, rich toasts (native API ABI v11)
 
-- Native API ABI v11. `System.onStateChange(listener)` reports `sleeping`, `resumed`, `game-started` and
+One ABI bump, v11, covers the three additions below (System, Notifications.send, Daemon).
+
+- An app can declare a headless second script, `"daemon": "daemon/main.js"` in `app.json` (with networking
+  and console filesystem access). The build bundles it into `pandorad`: QuickJS with the native modules that
+  need no screen (Downloads, Http, FileSystem, DownloadFormats, Archives, Packages, Notifications, Power,
+  Platform), timers on the system clock and a 32 MiB heap, and no window, GL, input or sound. On PS5 it is
+  `pandorad.elf`, a payload for the loader on 9021, so it outlives the app; on the desktop a `pandorad`
+  program beside the preview, started in a session of its own.
+- New `Daemon` module (native API ABI v11): `Daemon.start({token, stateDir})` in the app; `Daemon.args`,
+  `Daemon.serve(handler)` and `Daemon.exit(code)` in the daemon, which serves HTTP/1.1 on 127.0.0.1:9061
+  (token checked natively except `GET /hello` and `/i/`, keep-alive, 1 MiB bodies, 8 connections). Its log is
+  `<FileSystem.dataDir>/daemon.log`, the previous run's kept as `daemon.prev.log`. On PS5, `Daemon.start`
+  copies `rar-extract.elf` and `pkg-installer.elf` to `/data/ps5-react/<TITLE>/bin/` (SHA-256 checked) and
+  the daemon starts them from there: the payload loader client now sends a program from any app path
+  (`payload_loader::set_directory`). `tools/test_daemon.py` covers the desktop end to end; `tools/verify.py`
+  checks `pandorad.elf` and its hash. Not yet run on a console.
+- `System.onStateChange(listener)` reports `sleeping`, `resumed`, `game-started` and
   `game-ended` events (`{state, at, source, titleId?, pausedMs?}`) on the JavaScript thread, and
   `System.runningGame()` the game running beside the app. A watcher thread (`native/shared/system_state.cpp`)
   reads `sceSystemServiceReceiveEvent` (BEFORE_SLEEP, ON_RESUME), the `SceSystemStateMgrInfo` event flag,

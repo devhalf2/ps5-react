@@ -76,6 +76,18 @@ def main():
                                           "--inspect", "--file", str(path)], text=True)
         assert "integrity: valid" in result
 
+    daemon = app / "pandorad.elf"
+    if receipt["config"].get("daemon"):
+        # The daemon payload, and the workers Daemon.start copies beside it on /data.
+        elf = daemon.read_bytes()
+        assert elf[:4] == b"\x7fELF" and struct.unpack_from("<H", elf, 18)[0] == 62, "pandorad.elf is an x86-64 ELF"
+        assert receipt["daemon"]["elf_sha256"] == digest(daemon) == receipt["files"]["pandorad.elf"], "pandorad.elf hash"
+        assert receipt["daemon"]["bundle_sha256"] == digest(ROOT / ".build" / receipt["app"] / "generated/daemon.bundle.js")
+        for worker in ("rar-extract.elf", "pkg-installer.elf"):
+            assert worker in receipt["files"], f"{worker} ships for the daemon"
+    else:
+        assert not daemon.exists() and "daemon" not in receipt, "pandorad.elf without a daemon entry"
+
     receipt = json.loads(receipt_path.read_text())
     assert receipt["hardware_tested"] is False
     for name, checksum in receipt["files"].items():
@@ -84,7 +96,7 @@ def main():
         assert package.testzip() is None
         for name, checksum in receipt["files"].items():
             assert package.read(TITLE + "/" + name) == (app / name).read_bytes(), name
-    print("PASS: title metadata, icon, backgrounds, PS5 ELF/segments, SELF integrity, hashes and ZIP")
+    print("PASS: title metadata, icon, backgrounds, PS5 ELF/segments, SELF integrity, daemon, hashes and ZIP")
 
 
 if __name__ == "__main__":

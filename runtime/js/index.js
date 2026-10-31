@@ -44,3 +44,4 @@ export function useController(handler) {
 export function tw(classes) {
   throw new Error(`tw\`${classes.join('')}\` was not compiled; use it in an app source file`);
 }
+export {Daemon} from './native.js';

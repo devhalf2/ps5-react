@@ -509,6 +509,7 @@ void ps5_react_install_host_api(JSContext* ctx) {
   JS_SetPropertyStr(ctx, api, "shader", shader_layers::api(ctx));
   JS_SetPropertyStr(ctx, api, "system", ps5_react_system_api(ctx));
   JS_SetPropertyStr(ctx, api, "notifications", ps5_react_notifications_api(ctx));
+  JS_SetPropertyStr(ctx, api, "daemon", ps5_react_daemon_api(ctx));
   JSValue global = JS_GetGlobalObject(ctx);
   JS_SetPropertyStr(ctx, global, "__ps5ReactNative", api);
   JS_FreeValue(ctx, global);

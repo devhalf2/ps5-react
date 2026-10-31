@@ -20,6 +20,7 @@ int sceNetSetsockopt(int socket, int level, int option, const void* value, std::
 namespace payload_loader {
 namespace {
 struct NetAddress { std::uint8_t length, family; std::uint16_t port; std::uint32_t address; std::uint16_t virtual_port; std::uint8_t zero[6]; };
+std::string program_directory = "/app0";
 
 bool send_all(int socket, const char* data, std::size_t size) {
   while (size) {
@@ -31,18 +32,28 @@ bool send_all(int socket, const char* data, std::size_t size) {
 }
 }
 
-int send(const char* program, const std::string& request, int timeout_us, const char* what, std::string& error) {
-  char path[PATH_MAX];
-  const std::string logical = std::string("/app0/") + program;
-  const int file = host::resolve_path(logical.c_str(), path, sizeof path) ? open(path, O_RDONLY) : -1;
-  if (file < 0) { error = std::string(what) + ": " + program + " is missing from the app folder"; return -1; }
+void set_directory(const std::string& directory) { program_directory = directory; }
+
+int connect(int port, int timeout_us) {
   const int socket = sceNetSocket("ps5-react-payload", 2, 1, 6);
   constexpr int connect_us = 5'000'000, level = 0xffff;
-  const NetAddress address{sizeof(NetAddress), 2, static_cast<std::uint16_t>((9021 << 8) | (9021 >> 8)), 0x0100007f, 0, {}};
-  bool ok = socket >= 0 && sceNetSetsockopt(socket, level, 0x1105, &timeout_us, sizeof timeout_us) >= 0 &&
-            sceNetSetsockopt(socket, level, 0x1106, &timeout_us, sizeof timeout_us) >= 0 &&
-            sceNetSetsockopt(socket, level, 0x1109, &connect_us, sizeof connect_us) >= 0 &&
-            sceNetConnect(socket, &address, sizeof address) >= 0;
+  const auto network_port = static_cast<std::uint16_t>(((port & 0xff) << 8) | ((port >> 8) & 0xff));
+  const NetAddress address{sizeof(NetAddress), 2, network_port, 0x0100007f, 0, {}};
+  const bool ok = socket >= 0 && sceNetSetsockopt(socket, level, 0x1105, &timeout_us, sizeof timeout_us) >= 0 &&
+                  sceNetSetsockopt(socket, level, 0x1106, &timeout_us, sizeof timeout_us) >= 0 &&
+                  sceNetSetsockopt(socket, level, 0x1109, &connect_us, sizeof connect_us) >= 0 &&
+                  sceNetConnect(socket, &address, sizeof address) >= 0;
+  if (!ok && socket >= 0) sceNetSocketClose(socket);
+  return ok ? socket : -1;
+}
+
+int send(const char* program, const std::string& request, int timeout_us, const char* what, std::string& error) {
+  char path[PATH_MAX];
+  const std::string logical = program[0] == '/' ? std::string(program) : program_directory + "/" + program;
+  const int file = host::resolve_path(logical.c_str(), path, sizeof path) ? open(path, O_RDONLY) : -1;
+  if (file < 0) { error = std::string(what) + ": " + logical + " is missing"; return -1; }
+  const int socket = connect(9021, timeout_us);
+  bool ok = socket >= 0;
   if (!ok) error = std::string(what) + ": the payload loader on port 9021 did not answer; load an ELF loader and retry";
   char buffer[65536];
   for (ssize_t count; ok && (count = read(file, buffer, sizeof buffer)) != 0;)
