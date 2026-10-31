@@ -4,6 +4,7 @@
 #include "host_api.hpp"
 #include "shader_layers.hpp"
 #include "removals.hpp"
+#include "system_state.hpp"
 #include "text_shaper.hpp"
 
 extern "C" {
@@ -385,7 +386,10 @@ JSValue pad_vibrate(JSContext* ctx, JSValueConst, int, JSValueConst* argv) {
 }
 
 JSValue power_keep_awake(JSContext* ctx, JSValueConst, int, JSValueConst* argv) {
-  host::keep_awake(JS_ToBool(ctx, argv[0]) > 0);
+  const bool enabled = JS_ToBool(ctx, argv[0]) > 0;
+  host::keep_awake(enabled);
+  // Also resets the console's auto power-down timer every minute (system_state.cpp).
+  system_state::keep_awake(enabled);
   return JS_UNDEFINED;
 }
 
@@ -503,6 +507,8 @@ void ps5_react_install_host_api(JSContext* ctx) {
   JS_SetPropertyStr(ctx, api, "image", ps5_react_image_api(ctx));
   JS_SetPropertyStr(ctx, api, "sound", ps5_react_sound_api(ctx));
   JS_SetPropertyStr(ctx, api, "shader", shader_layers::api(ctx));
+  JS_SetPropertyStr(ctx, api, "system", ps5_react_system_api(ctx));
+  JS_SetPropertyStr(ctx, api, "notifications", ps5_react_notifications_api(ctx));
   JSValue global = JS_GetGlobalObject(ctx);
   JS_SetPropertyStr(ctx, global, "__ps5ReactNative", api);
   JS_FreeValue(ctx, global);

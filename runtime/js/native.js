@@ -95,10 +95,81 @@ export const FileSystem = {
   diskUsage: path => host().fs.diskUsage(path),
 };
 
+/**
+ * @typedef {'info' | 'done' | 'failed' | 'attention'} ToastKind
+ * @typedef {{id: string, title: string, body?: string, icon?: string, kind?: ToastKind}} Toast
+ *   `icon` is an app path (/download0/icons/x.png) or an http(s) URL; without one, the kind picks a
+ *   system icon ('failed' and 'attention' a caution sign, the others a download arrow).
+ */
+
 export const Notifications = {
   /** @param {string} message @param {string} [subMessage] @returns {boolean} */
   show: (message, subMessage = '') => host().notify(message, subMessage),
+  /**
+   * A rich toast in the system's Downloads channel. A later toast with the same `id` replaces this
+   * one instead of stacking. Falls back to `show(title, body)` where rich toasts are unavailable (the
+   * desktop preview prints it). @param {Toast} toast @returns {boolean} whether a toast was sent
+   */
+  send({id, title, body = '', icon = '', kind = 'info'}) {
+    if (typeof id !== 'string' || id === '') throw new TypeError('Notifications.send: id must be a non-empty string');
+    if (typeof title !== 'string') throw new TypeError(`Notifications.send ${id}: title must be a string`);
+    return host().notifications.send(id, title, String(body), String(icon), kind);
+  },
 };
+
+/**
+ * @typedef {'sleeping' | 'resumed' | 'game-started' | 'game-ended'} SystemState
+ * @typedef {{state: SystemState, at: number, source: string, titleId?: string, pausedMs?: number}} SystemEvent
+ *   `at` is milliseconds since the Unix epoch. `source` says what reported it: 'event' (the system
+ *   service), 'state-flag' (the state manager), 'sigcont', 'gap' (the process did not run for over
+ *   10 s; `pausedMs` says how long), 'game-poll' or 'simulated'. game-started/game-ended carry `titleId`.
+ */
+
+const systemListeners = new Set();
+let systemTimer = null;
+
+function pollSystem() {
+  for (const event of host().system.poll()) {
+    const frozen = Object.freeze(event);
+    for (const listener of [...systemListeners]) {
+      try { listener(frozen); }
+      catch (error) { console.error('System state listener failed:', error); }
+    }
+  }
+}
+
+/** Console state: rest mode, resume, and a game running beside the app (docs/NATIVE-API.md). */
+export const System = Object.freeze({
+  /**
+   * Calls `listener` on the JavaScript thread for each state change after this call; a resume that
+   * several sources report arrives once. Returns the function that unsubscribes it.
+   * @param {(event: SystemEvent) => void} listener @returns {() => void}
+   */
+  onStateChange(listener) {
+    if (typeof listener !== 'function') throw new TypeError('System.onStateChange: expected a function');
+    if (systemListeners.size === 0) {
+      host().system.poll(); // Changes from before the first listener are not replayed.
+      systemTimer = setInterval(pollSystem, 500);
+    }
+    systemListeners.add(listener);
+    return () => {
+      if (!systemListeners.delete(listener) || systemListeners.size > 0) return;
+      clearInterval(systemTimer);
+      systemTimer = null;
+    };
+  },
+  /**
+   * The game running beside the app, as last checked (every 3 s), or null. Best effort and not yet
+   * verified on a console; always null in the desktop preview unless simulated.
+   * @returns {{titleId: string} | null}
+   */
+  runningGame: () => host().system.runningGame(),
+  /**
+   * Test hook: reports `state` as the console would, to listeners and to the native services.
+   * @param {SystemState} state @param {{titleId?: string}} [options] the game for 'game-started'
+   */
+  simulate: (state, {titleId = ''} = {}) => host().system.simulate(state, titleId),
+});
 
 export const Users = {
   /** @returns {User | null} */
@@ -178,7 +249,8 @@ export const Linking = {
 export const Power = {
   /**
    * While on, the console does not enter rest mode for inactivity (the desktop display does not
-   * sleep): turn it on for a long download, off when it ends. The last call wins.
+   * sleep): turn it on for a long download, off when it ends. The last call wins. On PS5 it ticks
+   * the system power timer and resets the auto power-down timer every minute.
    * @param {boolean} enabled
    */
   keepAwake: enabled => host().power.keepAwake(Boolean(enabled)),

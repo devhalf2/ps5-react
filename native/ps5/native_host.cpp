@@ -8,6 +8,7 @@
 #include "packages.hpp"
 #include "removals.hpp"
 #include "browser_capture.hpp"
+#include "system_state.hpp"
 #include "render_workers.hpp"
 #include "thread_name.hpp"
 #include "app_config.hpp"
@@ -556,6 +557,7 @@ bool run_proof() {
   packages::stop();
   removals::stop();
   network::stop();
+  system_state::stop();
   if (runtime) er_runtime_shutdown();
   text_shaper::shutdown();
   ps5_react_stop_sound();
