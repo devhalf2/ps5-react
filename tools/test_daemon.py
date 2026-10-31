@@ -16,6 +16,7 @@ import subprocess
 import sys
 import threading
 import time
+import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
@@ -211,7 +212,14 @@ def run(command, build, env, data_dir, file_port):
         "url": f"http://127.0.0.1:{file_port}/file.bin", "destination": "/download0/daemon-test/file.bin"}))
     assert status == 200 and json.loads(body) == {"state": "completed", "size": len(DATA)}, body
     assert (data_dir / "daemon-test/file.bin").read_bytes() == DATA
-    print(f"PASS: Downloads in the daemon wrote {len(DATA)} bytes from a local server.")
+    with zipfile.ZipFile(data_dir / "daemon-test/files.zip", "w") as archive:
+        archive.writestr("game/readme.txt", "hello")
+        archive.writestr("game/data.bin", DATA[:65536])
+    status, _, body = request("POST", "/extract", body=json.dumps({
+        "source": "/download0/daemon-test/files.zip", "destination": "/download0/daemon-test/extracted"}))
+    assert status == 200 and json.loads(body) == {"state": "completed", "files": ["game"]}, body
+    assert (data_dir / "daemon-test/extracted/game/data.bin").read_bytes() == DATA[:65536]
+    print(f"PASS: Downloads in the daemon wrote {len(DATA)} bytes from a local server; Archives extracted a ZIP.")
 
     status, _, body = request("POST", "/exit?code=0")
     assert status == 200 and body == b"{}", (status, body)

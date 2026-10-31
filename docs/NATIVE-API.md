@@ -17,7 +17,7 @@ Controller.setLightBar('#38bdf8');
 ## Contract
 
 The modules in `runtime/js/native.js` wrap `globalThis.__ps5ReactNative`, which
-each host installs before the bundle runs. Its exact shape (ABI v10) is
+each host installs before the bundle runs. Its exact shape (ABI v11) is
 documented in [`native/shared/host_api.hpp`](../native/shared/host_api.hpp).
 `native/shared/host_api.cpp` implements the filesystem with POSIX and the object
 itself; `native/ps5/` and `native/desktop/` implement the platform functions.
@@ -592,3 +592,94 @@ Native shape: `browser.capture(prefix, suffix, timeoutSeconds)` returns a task
 ID; `browser.cancel(id)` requests cancellation; `browser.poll()` consumes
 terminal results. Calls submit/poll synchronously on the render thread; all
 payload transport runs on the worker.
+
+## Daemon (ABI v11)
+
+A daemon is a second, headless script of the app that keeps running after the
+app closes: Pandora's download queue goes on while a game runs. The app declares
+it in `app.json` and starts it; the daemon serves HTTP on `127.0.0.1:9061`, which
+the app reaches with `Http.request`.
+
+```json
+{"daemon": "daemon/main.js", "networking": true, "filesystemAccess": "console"}
+```
+
+```js
+// daemon/main.js: no JSX, no UI.
+import {Daemon} from '@ps5-react/core';
+const {token, stateDir, version} = Daemon.args;
+Daemon.serve(async ({method, path, query, headers, body}) => {
+  if (path === '/hello') return {status: 200, body: JSON.stringify({protocol: 1, version})};
+  if (path === '/shutdown') { setTimeout(() => Daemon.exit(0), 0); return {status: 200, body: '{}'}; }
+  return {status: 404, body: '{}'};
+});
+
+// The app.
+const {ok, error} = await Daemon.start({token, stateDir: '/data/ps5-react/PPSA99060/queue'});
+const hello = await Http.request('http://127.0.0.1:9061/hello');
+```
+
+| Member | Where | Notes |
+| --- | --- | --- |
+| `Daemon.supported` | both | The app declares a `daemon` entry |
+| `Daemon.isDaemon` | both | True only inside the daemon |
+| `Daemon.args` | daemon | `{token, stateDir, version}` from `Daemon.start`; `null` in the app |
+| `Daemon.start({token, stateDir})` | app | `Promise<{ok, error?}>`; never rejects |
+| `Daemon.serve(handler)` | daemon | Answers each request with what `handler` returns or resolves |
+| `Daemon.exit(code)` | daemon | Answers what is pending, stops the native services, flushes the log, exits |
+
+**Build.** The build bundles the entry with `@ps5-react/core` resolving to the
+modules a daemon can use (`runtime/js/headless.js`): `Downloads`, `Http`,
+`FileSystem`, `DownloadFormats`, `Archives`, `Packages`, `Notifications`,
+`Power`, `Platform`, `DeviceInfo` and `Daemon`, plus timers and `console`.
+Importing a UI module or `Linking`/`BrowserCapture` fails the build. It runs in
+`pandorad`, a host with QuickJS and those native modules and no window, GL,
+input or sound: `pandorad.elf` in the PS5 app folder, a `pandorad` program
+beside the desktop preview. Its JavaScript runtime has the app's globals (no
+`Date` objects) and a 32 MiB heap; timers run on the system clock.
+The daemon requires `networking` and `filesystemAccess: "console"`.
+
+**Start.** `Daemon.start` sends the daemon `PDD1\n<token>\n<stateDir>\n<version>\n`
+(`version` is `app.json`'s) and resolves once it answers `ready`, within 10 s.
+When the port is already taken the new daemon answers `busy` and exits with code
+3; the start then succeeds if `GET /hello` answers 200. The token is one line of
+at most 128 characters and `stateDir` an absolute path.
+
+- PS5: the engine first copies `rar-extract.elf` and `pkg-installer.elf` from the
+  app folder to `/data/ps5-react/<TITLE>/bin/` (SHA-256 checked, through a
+  temporary file), then sends `pandorad.elf` to the payload loader on
+  `127.0.0.1:9021`, like the other payloads. As the loader's child it outlives
+  the app. It needs console filesystem access.
+- Desktop: the preview spawns `pandorad` in a session of its own (`setsid`), so
+  closing the preview leaves it running. `PS5_REACT_DAEMON_PORT` moves the
+  preview's daemon off 9061, for tests beside other programs.
+
+**Serving.** The first request waits until the script calls `Daemon.serve`; the
+port is bound before the script runs, so a second daemon leaves before any of
+its script runs. Each request reaches the handler on the script's thread as
+`{method, path, query, headers, body}`: `path` as sent, `query` its decoded
+parameters as an object, `headers` with lowercase names, `body` a string. The
+handler returns `{status, headers?, body?}` (status 200-599, a string body);
+framing headers are the server's. A handler that throws or returns anything else
+answers 500, and the error goes to the log. The server answers by itself:
+
+- 401 when `x-pandora-token` differs from `Daemon.args.token`, except `GET /hello`
+  and paths under `/i/`;
+- 413 for a body over 1 MiB (`Expect: 100-continue` is honored), 501 for chunked
+  bodies, 431 for a request head over 16 KiB;
+- 503 to a ninth concurrent connection. Connections are kept alive and dropped
+  after a minute idle.
+
+**Paths and log.** On PS5 the app's sandbox mounts go away when it closes, so in
+the daemon `/download0` (`FileSystem.dataDir`) is `/data/ps5-react/<TITLE>`,
+`/temp0` and `/cache0` are its `tmp` and `cache` folders, and `/app0` is refused;
+other absolute paths are used as they are. Keep shared state on `/data` (an
+absolute `stateDir`). The daemon starts workers from `<FileSystem.dataDir>/bin`.
+On the desktop the paths resolve in the preview's sandbox. Console lines,
+uncaught errors and the native log go to `<FileSystem.dataDir>/daemon.log`; the
+previous run's is kept as `daemon.prev.log`.
+
+**Not yet available:** the `/i/` range server for the console's installer
+(E6), sleep and resume events, and idle exit, which the script decides with
+`Daemon.exit`. Nothing of the daemon has run on a console yet
+([HARDWARE.md](HARDWARE.md)).

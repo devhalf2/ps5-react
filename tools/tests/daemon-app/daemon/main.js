@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Additional attribution term: see LICENSE-ATTRIBUTION.
 // The fixture daemon tools/test_daemon.py drives: each route exercises one part of the contract.
-import {Daemon, Downloads, FileSystem, Platform} from '@ps5-react/core';
+import {Archives, Daemon, Downloads, FileSystem, Platform} from '@ps5-react/core';
 
 const {version, stateDir} = Daemon.args;
 const startedAt = Date.now();
@@ -25,6 +25,11 @@ Daemon.serve(async ({method, path, query, headers, body}) => {
     FileSystem.mkdir(destination.slice(0, destination.lastIndexOf('/')), {recursive: true});
     const result = await Downloads.enqueue({url, destination, connections: 4, resume: false}).done;
     return json(200, {state: result.state, size: FileSystem.stat(destination).size});
+  }
+  if (path === '/extract' && method === 'POST') {
+    const {source, destination} = JSON.parse(body);
+    const result = await Archives.extract({sources: [source], destination}).done;
+    return json(200, {state: result.state, files: FileSystem.readDir(destination).map(entry => entry.name).sort()});
   }
   if (path === '/wait') {
     await wait(Number(query.ms));
