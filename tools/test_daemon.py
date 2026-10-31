@@ -121,6 +121,7 @@ def main():
     shutil.rmtree(data_dir, ignore_errors=True)
     data_dir.mkdir(parents=True)
     files = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Files)
+    files.handle_error = lambda *_: None  # The download engine resets the keep-alive connections it is done with.
     threading.Thread(target=files.serve_forever, daemon=True).start()
     try:
         run(command, build, env, data_dir, files.server_address[1])

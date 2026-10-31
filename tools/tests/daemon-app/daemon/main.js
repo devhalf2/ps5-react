@@ -29,7 +29,7 @@ Daemon.serve(async ({method, path, query, headers, body}) => {
   if (path === '/extract' && method === 'POST') {
     const {source, destination} = JSON.parse(body);
     const result = await Archives.extract({sources: [source], destination}).done;
-    return json(200, {state: result.state, files: FileSystem.readDir(destination).map(entry => entry.name).sort()});
+    return json(200, {state: result.state, files: FileSystem.readDir(destination).map(entry => entry.name).filter(name => !name.startsWith('.')).sort()});
   }
   if (path === '/wait') {
     await wait(Number(query.ms));
