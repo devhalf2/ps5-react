@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased — console states, rich toasts, auto power-down reset
+
+- Native API ABI v11. `System.onStateChange(listener)` reports `sleeping`, `resumed`, `game-started` and
+  `game-ended` events (`{state, at, source, titleId?, pausedMs?}`) on the JavaScript thread, and
+  `System.runningGame()` the game running beside the app. A watcher thread (`native/shared/system_state.cpp`)
+  reads `sceSystemServiceReceiveEvent` (BEFORE_SLEEP, ON_RESUME), the `SceSystemStateMgrInfo` event flag,
+  SIGCONT and 10-second gaps in its own schedule, and every 3 s `sceSystemServiceGetAppIdOfRunningBigApp`
+  and `sceSystemServiceGetAppTitleId`. Native services can read `system_state::suspended()`,
+  `game_running()` and `resumed_at_us()`; the network and archive services do not use them yet.
+  `System.simulate` and the preview's `ps5_drive.py system <state>` inject states for tests.
+- `Notifications.send({id, title, body, icon, kind})` sends a rich Downloads-channel toast through
+  `sceNotificationSend`; a later toast with the same id replaces it (`bundleName` from the id). It falls
+  back to `Notifications.show`, which is unchanged.
+- `Power.keepAwake(true)` also calls `sceShellCoreUtilResetAutoPowerDownTimer` every 60 s.
+- The new Sony calls outside libkernel and `sceSystemServiceReceiveEvent` are looked up at run time, so a
+  firmware without them loses one feature instead of the title not starting. None of this has run on a
+  console yet; the log records each call's first result.
+
 ## Unreleased — animation handles after a long session
 
 - Animated values, animations and groups share one 16-bit handle counter, and every animation started takes

@@ -17,7 +17,7 @@ Controller.setLightBar('#38bdf8');
 ## Contract
 
 The modules in `runtime/js/native.js` wrap `globalThis.__ps5ReactNative`, which
-each host installs before the bundle runs. Its exact shape (ABI v10) is
+each host installs before the bundle runs. Its exact shape (ABI v11) is
 documented in [`native/shared/host_api.hpp`](../native/shared/host_api.hpp).
 `native/shared/host_api.cpp` implements the filesystem with POSIX and the object
 itself; `native/ps5/` and `native/desktop/` implement the platform functions.
@@ -185,6 +185,30 @@ returns `true` when the host accepted it.
 On PS5 it uses libkernel's `sceKernelSendNotificationRequest`: a plain toast whose
 subMessage follows the message on a second line.
 
+`Notifications.send({id, title, body?, icon?, kind?})` (ABI v11) shows a rich
+toast in the system's Downloads channel and returns `true` when one was sent.
+A later `send` with the same `id` replaces the toast instead of stacking a new
+one, so a job can post its start, completion and failure under one id.
+
+| Field | Notes |
+| --- | --- |
+| `id` | Non-empty string; letters, digits, `_` and `-` are kept, others become `_`, and only the first 48 count |
+| `title` | The toast's first line |
+| `body` | Optional second line |
+| `icon` | Optional app path (`/download0/icons/PPSA01234.png`, resolved to the console path) or http(s) URL |
+| `kind` | `'info'` (default), `'done'`, `'failed'` or `'attention'`; without an `icon`, `'failed'` and `'attention'` show the system's caution icon, the others its download icon |
+
+On PS5 it sends `sceNotificationSend(0xFE, true, json)` (the payload SDK's
+`samples/notify`), with `viewTemplateType` `InteractiveToastTemplateB`,
+`channelType` `Downloads`, `toastOverwriteType` `Always` and a `bundleName` of
+`ps5react_<TITLE_ID>_<id>`, the key the system's overlay replaces toasts by
+([ShadowMountPlus TOASTS.md](https://github.com/drakmor/ShadowMountPlus/blob/1.7/TOASTS.md)).
+`sceNotificationSend` is looked up in `libSceNotification.sprx` at run time;
+when that fails or the call returns an error, `send` falls back to
+`show(title, body)`. An unknown `kind` or an `icon` path outside the app's paths
+throws, naming the id. **Not yet validated on hardware**, from a title or from a
+payload: neither the toast nor the replacement has been seen on a console.
+
 ## Users
 
 | Function | Returns |
@@ -293,6 +317,78 @@ homebrew use). The desktop preview disables or enables the SDL screen saver and
 prints `[power] keep awake on|off`. **Not yet validated on hardware**: no test
 has shown a console staying awake through its rest-mode timeout.
 
+While it is on, the PS5 host also calls `sceShellCoreUtilResetAutoPowerDownTimer`
+once a minute (what the system's installer screen does during an install), from
+the console-state watcher thread of [System](#system-abi-v11), so the reset keeps
+going while the render loop is throttled. The call is looked up in
+`libSceSystemService.sprx` at run time; the log records whether it was found and
+its first result. Unvalidated on hardware like the tick.
+
+## System (ABI v11)
+
+`System` reports the console's state to an app, or to a background process
+built on this engine:
+
+```js
+import {System} from '@ps5-react/core';
+
+const unsubscribe = System.onStateChange(({state, at, source, titleId}) => {
+  if (state === 'sleeping') queue.pause();
+  if (state === 'resumed') queue.revalidateAndResume();
+});
+const game = System.runningGame(); // {titleId: 'PPSA01234'} | null
+```
+
+| Call | Notes |
+| --- | --- |
+| `System.onStateChange(listener)` | Calls `listener` on the JavaScript thread for each change after the call; returns the function that unsubscribes. Polls the host every 500 ms while a listener is subscribed. |
+| `System.runningGame()` | `{titleId}` of the game running beside the app as last checked, or `null`. |
+| `System.simulate(state, {titleId}?)` | Test hook: reports a state as the console would, to listeners and to the native services. |
+
+An event is `{state, at, source, titleId?, pausedMs?}`: `state` is
+`'sleeping'`, `'resumed'`, `'game-started'` or `'game-ended'`; `at` is
+milliseconds since the Unix epoch; `titleId` names the game of `game-started`
+and `game-ended`.
+
+A native thread (`native/shared/system_state.cpp`) watches once a second, with
+an explicit 512 KiB stack, so Sony calls never run on the render thread. Each
+`source` is one way the state is learned:
+
+| `source` | Reports | PS5 | Desktop |
+| --- | --- | --- | --- |
+| `event` | `sleeping`, `resumed` | `sceSystemServiceReceiveEvent`: `BEFORE_SLEEP` (0x10000001), `ON_RESUME` (0x10000000), as ezRemote Server reads them | — |
+| `state-flag` | `sleeping`, `resumed` | The `SceSystemStateMgrInfo` event flag (`sceKernelOpenEventFlag`/`sceKernelPollEventFlag`), as ShadowMountPlus reads it: `SUSPEND_ON_GOING` (300) or `MAIN_ON_STANDBY` (500) is sleeping, a return to `WORKING` (1000) a resume | — |
+| `sigcont` | `resumed` | `SIGCONT`, which PKG Manager treats as the end of standby | `kill -CONT` |
+| `gap` | `resumed`, with `pausedMs` | The watcher ran more than 10 s late by the monotonic or the wall clock (`network.cpp` uses the same rule) | The Mac's sleep, `kill -STOP` |
+| `game-poll` | `game-started`, `game-ended` | Every 3 s: `sceSystemServiceGetAppIdOfRunningBigApp`, then `sceSystemServiceGetAppTitleId` | — |
+| `simulated` | any | `System.simulate` | `System.simulate`, or `ps5_drive.py system <state> [titleId]` |
+
+A sleep is reported once until the next resume, and a resume reported by
+several sources within 15 seconds arrives once, from the first. A gap also
+follows a game in front throttling background threads (a `sleep(5)` has
+overrun 60 s there), so a `gap` resume does not prove rest mode. A process
+frozen in rest mode receives `sleeping` and `resumed` only once it runs again.
+
+`runningGame()` is the running big application other than this app, skipping
+system applications (`NPXS…`): a game in the background of the home screen
+still counts. It relies on the two `sceSystemService` calls etaHEN makes from
+ShellUI, looked up in `libSceSystemService.sprx` at run time. **Unverified**:
+whether a title or a payload may make them, and what they answer, needs a
+console (spike B7 of the background-downloads plan). Within an app it is `null`
+while the app itself is in front.
+
+Native services read the same state without JavaScript, from any thread:
+`system_state::suspended()` (between a sleep and the next resume),
+`system_state::game_running()` and `system_state::resumed_at_us()` (monotonic
+time of the last resume). `native/shared/system_state.hpp` declares them with
+the platform probes; a host installs `__ps5ReactNative.system` and calls
+`system_state::stop()` on exit. The network and archive services do not use
+them yet.
+
+**Not yet validated on hardware**: no PS5 has delivered any of these events to
+this engine. The log names each Sony call's first result
+(`system: sceSystemServiceReceiveEvent=0x…`) and every state-flag change.
+
 ## Fonts
 
 `Fonts.setLanguage(tag)` sets the interface language (a BCP 47 tag such as
@@ -324,6 +420,10 @@ desktop preview runs itself again.
   root. Unlike the console, `/app0` is writable on desktop; do not rely on it.
 - `mounts()` lists the Mac's mounted filesystems.
 - `Notifications.show` prints `[notify] message: subMessage` to the terminal.
+- `Notifications.send` prints `[notify] title: body`, as `show` does, and returns `true`.
+- `System` reports no console states of its own: `SIGCONT` and gaps (the Mac's
+  sleep) still arrive, and `System.simulate` or `ps5_drive.py system <state>`
+  feeds the rest. `runningGame()` is `null` unless simulated.
 - `Users` reports the macOS user (`$USER`) with id `1`.
 - Temperatures are `null`; `cpuFrequency` is `null` on Apple silicon.
 - `language` comes from `PS5_REACT_LANGUAGE`, else `LC_ALL`, `LC_MESSAGES` or
@@ -350,7 +450,9 @@ title can load these modules; when one cannot, only the dependent call degrades:
 | --- | --- | --- |
 | `DeviceInfo.get().model` | `libkernel_sys.sprx`, `libkernel.sprx` or `libkernel_web.sprx` | `null` |
 | `DeviceInfo.get().consoleId` | The same, else the `machdep.openpsid` sysctl | `null` |
-| `Notifications.show()` | `libSceNotification.sprx` | Returns `false` |
+| `Notifications.send()` | `libSceNotification.sprx` | Falls back to `Notifications.show()` |
+| `Power.keepAwake()` timer reset | `libSceSystemService.sprx` | Only the power tick runs |
+| `System.runningGame()` | `libSceSystemService.sprx` | `null`, and no game events |
 
 PS5 `diskUsage()` uses the native-title `_fstatfs` export on a descriptor opened
 with `sceKernelOpen`. `mounts()` discovers kernel-provided records through
