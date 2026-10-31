@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased — PKG install from a URL, console spike
+
+- `pkg-installer.elf` takes a second request, `PKI2`, for a console experiment: a package path or an
+  http(s) URL of at most 127 bytes that the console's installer downloads itself, with the content ID
+  required for a URL, raw status dumps (`dump`), exit after `started` (`detach`) and another install in
+  the same process (`more`). It bounds `sceAppInstUtilInitialize` at 10 s. `PKI1`, which the engine sends,
+  is unchanged. `tools/spike/pkg-url/` holds the Mac side: a Range server that logs every request, a sender
+  for the loader on 9021, a content-ID reader and the T1–T10 test steps (`tools/test_spike_pkg_url.py`).
+  Not yet run on a console.
+
 ## Unreleased — animation handles after a long session
 
 - Animated values, animations and groups share one 16-bit handle counter, and every animation started takes
