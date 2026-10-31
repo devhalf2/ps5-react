@@ -7,6 +7,7 @@
 #include "packages.hpp"
 #include "removals.hpp"
 #include "browser_capture.hpp"
+#include "system_state.hpp"
 #include "app_config.hpp"
 #define SDL_MAIN_HANDLED
 #include <SDL2/SDL.h>
@@ -157,6 +158,7 @@ struct Host {
   packages::stop();
   removals::stop();
   network::stop();
+    system_state::stop();
     if (runtime_started) er_runtime_shutdown();
     text_shaper::shutdown();
     ps5_react_stop_sound();
@@ -323,6 +325,11 @@ struct Host {
         Control::reply(client, call_js("__ps5ReactInspect", nullptr));
       } else if (verb == "focus") {
         Control::reply(client, call_js("__ps5ReactFocus", arg.c_str()) == "true" ? "ok" : "not found: " + arg);
+      } else if (verb == "system") {
+        // `system <state> [titleId]`: a console state as the PS5 would report it (System.onStateChange).
+        const std::size_t gap = arg.find(' ');
+        const std::string state = arg.substr(0, gap), title = gap == std::string::npos ? "" : arg.substr(gap + 1);
+        Control::reply(client, system_state::simulate(state.c_str(), title.c_str()) ? "ok" : "unknown state: " + state);
       } else if (verb == "logs") {
         Control::reply(client, control.take_logs());
       } else if (verb == "wait") {
@@ -807,8 +814,74 @@ bool storage_test() {
   return ok;
 }
 
+// Console state: simulated states reach JavaScript once each and in order, the native hooks follow
+// them, and the rich toast's JSON escapes its text and keys replacement on the id.
+bool system_test() {
+  JSContext* ctx = er_runtime_context();
+  const auto eval = [&](const char* script) {
+    JSValue result = JS_Eval(ctx, script, std::strlen(script), "system-test.js", JS_EVAL_TYPE_GLOBAL);
+    std::string text;
+    if (JS_IsException(result)) {
+      JSValue error = JS_GetException(ctx);
+      const char* message = JS_ToCString(ctx, error);
+      text = std::string("exception: ") + (message ? message : "?");
+      JS_FreeCString(ctx, message);
+      JS_FreeValue(ctx, error);
+    } else if (const char* value = JS_ToCString(ctx, result)) {
+      text = value;
+      JS_FreeCString(ctx, value);
+    }
+    JS_FreeValue(ctx, result);
+    return text;
+  };
+  const std::string started = eval(R"JS((() => {
+    const system = globalThis.__ps5ReactNative.system;
+    system.poll();
+    return [system.simulate('sleeping', ''), system.simulate('sleeping', ''),
+            system.simulate('game-started', 'PPSA01234')].join();
+  })())JS");
+  const bool hooks_on = system_state::suspended() && system_state::game_running() &&
+                        system_state::running_game() == "PPSA01234";
+  const std::string ended = eval(R"JS((() => {
+    const system = globalThis.__ps5ReactNative.system;
+    const game = system.runningGame();
+    system.simulate('resumed', '');
+    system.simulate('game-ended', '');
+    const events = system.poll().map(e => `${e.state}:${e.source}:${e.titleId ?? ''}:${typeof e.at}`).join();
+    let threw = false;
+    try { system.simulate('asleep', ''); } catch (error) { threw = /system.simulate asleep/.test(error.message); }
+    return [game && game.titleId, events, system.runningGame(), threw].join('|');
+  })())JS");
+  const bool hooks_off = !system_state::suspended() && !system_state::game_running() && system_state::resumed_at_us() > 0;
+  const std::string sent = eval(R"JS((() => {
+    const notifications = globalThis.__ps5ReactNative.notifications;
+    const errors = [['', 'info'], ['job', 'loud']].map(([id, kind]) => {
+      try { notifications.send(id, 'Title', '', '', kind); return 'sent'; } catch (error) { return error.name; }
+    });
+    return [notifications.send('job/1', 'Downloaded', 'Ready to install', '', 'done'), ...errors].join();
+  })())JS");
+  const std::string json = toast::json("job/1", "a\"b", "line\nnext", "", "failed", 1234);
+  const std::string url = toast::json("job", "t", "", "/data/icon.png", "info", 0);
+  const bool payload = json.find(R"("bundleName":"ps5react_)" PS5_REACT_TITLE R"(_job_1")") != std::string::npos &&
+                       json.find(R"("message":{"body":"a\"b"},"subMessage":{"body":"line\nnext"})") != std::string::npos &&
+                       json.find(R"("icon":"error_message_caution")") != std::string::npos &&
+                       json.find(R"("toastOverwriteType":"Always")") != std::string::npos &&
+                       json.find(R"("createdDateTime":"1970-01-01T00:00:01.234Z")") != std::string::npos &&
+                       url.find(R"({"type":"Url","parameters":{"url":"/data/icon.png"}})") != std::string::npos &&
+                       url.find("subMessage") == std::string::npos;
+  const bool ok = started == "true,true,true" && hooks_on && hooks_off && payload &&
+                  ended == "PPSA01234|sleeping:simulated::number,game-started:simulated:PPSA01234:number,"
+                           "resumed:simulated::number,game-ended:simulated:PPSA01234:number||true" &&
+                  sent == "true,TypeError,TypeError";
+  if (!ok)
+    std::fprintf(stderr, "System test failed: started=%s hooks=%d/%d payload=%d ended=%s sent=%s\n", started.c_str(),
+                 hooks_on, hooks_off, payload, ended.c_str(), sent.c_str());
+  else std::puts("PASS: console states (simulated) reach JavaScript and the native hooks; rich toast JSON.");
+  return ok;
+}
+
 bool self_test(Host& host) {
-  if (!storage_test() || !console_id_test()) return false;
+  if (!storage_test() || !console_id_test() || !system_test()) return false;
   for (int i = 0; i < 4; ++i) if (!host.frame()) return false;
   if (!shader_test(host)) return false;
   if (!expect(0, 0, 0) || !host.snapshot("texture-initial.ppm")) return false;
