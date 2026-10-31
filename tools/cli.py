@@ -66,6 +66,7 @@ def desktop(app, test=False, target="ps5-react-preview"):
         run(["python3", ROOT / "tools/test_browser_capture.py"], log=ROOT / ".build/browser-capture-test.log")
         run(["python3", ROOT / "tools/test_sce_art.py"], log=ROOT / ".build/sce-art-test.log")
         run(["python3", ROOT / "tools/test_daemon.py"], log=ROOT / ".build/daemon-test.log")
+        run(["python3", ROOT / "tools/test_spike_pkg_url.py"], log=ROOT / ".build/spike-pkg-url-test.log")
         command.append("--self-test")
     return command, build
 
