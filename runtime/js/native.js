@@ -490,3 +490,61 @@ export function acquireImage(uri, width, height, fit, prefetch, listener) {
   }
   return release;
 }
+
+/**
+ * A headless copy of the app that keeps running after the app closes (pandorad): the app's `daemon`
+ * entry (app.json) with the non-UI modules, serving HTTP on 127.0.0.1:9061. See docs/NATIVE-API.md.
+ */
+export const Daemon = Object.freeze({
+  /** Whether this build has a daemon: the app declares a `daemon` entry. */
+  get supported() { return host().daemon?.supported === true; },
+  /** True only inside the daemon. */
+  get isDaemon() { return host().daemon?.isDaemon === true; },
+  /** Inside the daemon `{token, stateDir, version}` from Daemon.start; null in the app.
+   * @returns {{token: string, stateDir: string, version: string} | null} */
+  get args() { return host().daemon?.args ?? null; },
+  /**
+   * App side: starts the daemon unless one already answers, and resolves once it serves. Never rejects.
+   * @param {{token: string, stateDir: string}} options
+   * @returns {Promise<{ok: boolean, error?: string}>}
+   */
+  async start({token, stateDir} = {}) {
+    try {
+      const api = host().daemon;
+      if (!api?.start) throw new Error('Daemon.start: this host has no daemon support');
+      await networkTask(api.start(String(token ?? ''), String(stateDir ?? '')), 'Daemon.start', '', 'daemon').done;
+      return {ok: true};
+    } catch (error) {
+      return {ok: false, error: error?.message ?? String(error)};
+    }
+  },
+  /**
+   * Daemon side: listens on 127.0.0.1:9061 and calls `handler({method, path, query, headers, body})` for
+   * each request; it returns (or resolves) `{status, headers?, body?}` with a string body. Requests without
+   * the token are answered 401 before they reach it (except GET /hello and /i/...). A handler that throws
+   * answers 500.
+   * @param {(request: {method: string, path: string, query: Record<string, string>,
+   *   headers: Record<string, string>, body: string}) =>
+   *   {status: number, headers?: Record<string, string>, body?: string}
+   *   | Promise<{status: number, headers?: Record<string, string>, body?: string}>} handler
+   */
+  serve(handler) {
+    if (typeof handler !== 'function') throw new TypeError('Daemon.serve: expected a function');
+    const api = host().daemon;
+    if (!api?.serve) throw new Error('Daemon.serve: only the daemon serves');
+    api.serve((request, respond) => {
+      Promise.resolve().then(() => handler(request)).then(respond, error => {
+        console.error(`Daemon.serve: ${request.method} ${request.path} failed: ${error}${error?.stack ? `\n${error.stack}` : ''}`);
+        respond({status: 500, headers: {'content-type': 'application/json'},
+          body: JSON.stringify({error: {message: String(error?.message ?? error)}})});
+      });
+    });
+  },
+  /** Daemon side: finishes the responses already given, stops the native services, flushes the log and
+   * exits with `code`. @param {number} [code] */
+  exit(code = 0) {
+    const api = host().daemon;
+    if (!api?.exit) throw new Error('Daemon.exit: only the daemon exits this way; use BackHandler.exitApp');
+    api.exit(code);
+  },
+});

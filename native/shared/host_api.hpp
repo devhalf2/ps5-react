@@ -1,7 +1,7 @@
 // Copyright (C) 2026 half144 and PS5 React contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Additional attribution term: see LICENSE-ATTRIBUTION.
-// Native API contract (ABI v10) between the hosts and `@ps5-react/core`. The input actions hosts
+// Native API contract (ABI v11) between the hosts and `@ps5-react/core`. The input actions hosts
 // pass to `__ps5ReactDispatch` are a separate contract with its own version (runtime/js/input.js).
 //
 // host_api.cpp (shared) installs `globalThis.__ps5ReactNative` through
@@ -89,6 +89,16 @@
 //                                  0.05..1, uniforms {name: number | [2..4 numbers]}; all optional
 //   shader.destroy(id)
 //   shader.error(id)               the GLSL info log of a failed compile or link, else null
+//   daemon.supported               ABI v11; the app declares a daemon entry (app.json "daemon")
+//   daemon.isDaemon                true only in pandorad, the headless daemon host (native/daemon)
+//   daemon.args                    in the daemon {token, stateDir, version}; null in the app
+//   daemon.start(token, stateDir)  app; task ID; starts pandorad (PS5: through the payload loader, after
+//                                  copying the worker ELFs to the title's /data folder) and completes once
+//                                  it is ready or one already answers GET /hello on 127.0.0.1:9061
+//   daemon.poll() / cancel(id)     app; state/error of the start; cancel stops waiting only
+//   daemon.serve(callback)         daemon; listens on 127.0.0.1:9061, calls callback(request, respond) per
+//                                  request; respond({status, headers, body}) answers it
+//   daemon.exit(code)              daemon; answers what is pending, stops the services and exits
 //   exit(relaunch)                 asks the host to close after this frame; with relaunch true it
 //                                  opens the app again once closed and returns true, or the reason
 //                                  it cannot (PS5: needs the payload loader on 127.0.0.1:9021)
@@ -217,3 +227,6 @@ JSValue ps5_react_package_api(JSContext* ctx);
 
 // ABI v7: filename-bound browser capture tasks (PS5 only).
 JSValue ps5_react_browser_capture_api(JSContext* ctx);
+// ABI v11: the app's daemon. The app's hosts start it (native/shared/daemon_api.cpp); pandorad defines its
+// own, which serves (native/daemon).
+JSValue ps5_react_daemon_api(JSContext* ctx);
