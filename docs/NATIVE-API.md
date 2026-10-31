@@ -186,7 +186,8 @@ On PS5 it uses libkernel's `sceKernelSendNotificationRequest`: a plain toast who
 subMessage follows the message on a second line.
 
 `Notifications.send({id, title, body?, icon?, kind?})` (ABI v11) shows a rich
-toast in the system's Downloads channel and returns `true` when one was sent.
+toast in the system's Downloads channel and returns `true` when the system call
+returned success (not yet seen on a console; see [HARDWARE.md](HARDWARE.md)).
 A later `send` with the same `id` replaces the toast instead of stacking a new
 one, so a job can post its start, completion and failure under one id.
 
@@ -727,10 +728,11 @@ const hello = await Http.request('http://127.0.0.1:9061/hello');
 | `Daemon.isDaemon` | both | True only inside the daemon |
 | `Daemon.args` | daemon | `{token, stateDir, version}` from `Daemon.start`; `null` in the app |
 | `Daemon.pid` | daemon | The daemon's process ID (for `/hello` and the owner lock); `null` in the app |
+| `Daemon.randomToken()` | app | 32 hex characters from the system's random source for the token; `null` without one |
 | `Daemon.port` | both | The loopback port it serves on: 9061, or `PS5_REACT_DAEMON_PORT` on the desktop |
 | `Daemon.start({token, stateDir})` | app | `Promise<{ok, error?}>`; never rejects |
 | `Daemon.serve(handler)` | daemon | Answers each request with what `handler` returns or resolves |
-| `Daemon.exit(code)` | daemon | Answers what is pending, stops the native services, flushes the log, exits |
+| `Daemon.exit(code)` | daemon | Answers what is pending, stops the native services, then lets go of the port (a refused connection means no transfer of it still writes), flushes the log, exits |
 
 **Build.** The build bundles the entry with `@ps5-react/core` resolving to the
 modules a daemon can use (`runtime/js/headless.js`): `Downloads`, `Http`,
@@ -782,9 +784,11 @@ other absolute paths are used as they are. Keep shared state on `/data` (an
 absolute `stateDir`). The daemon starts workers from `<FileSystem.dataDir>/bin`.
 On the desktop the paths resolve in the preview's sandbox. Console lines,
 uncaught errors and the native log go to `<FileSystem.dataDir>/daemon.log`; the
-previous run's is kept as `daemon.prev.log`.
+previous run's is kept as `daemon.prev.log`, and a log that reaches 8 MiB is
+rotated the same way, so the daemon keeps logging. Sleep, resume and the running
+game reach the daemon through [System](#system-abi-v11), as in the app.
 
 **Not yet available:** the `/i/` range server for the console's installer
-(E6), sleep and resume events, and idle exit, which the script decides with
+(E6), and idle exit, which the script decides with
 `Daemon.exit`. Nothing of the daemon has run on a console yet
 ([HARDWARE.md](HARDWARE.md)).

@@ -11,6 +11,7 @@ export const TOKEN = '0123456789abcdef0123456789abcdef';
 async function run() {
   const report = (name, value) => console.log(`daemon-test ${name} ${JSON.stringify(value)}`);
   report('app', {supported: Daemon.supported, isDaemon: Daemon.isDaemon, args: Daemon.args});
+  report('random', [Daemon.randomToken(), Daemon.randomToken()]);
   try { Daemon.serve(() => ({status: 200})); report('serve', 'accepted'); }
   catch (error) { report('serve', error.message); }
   report('invalid', await Daemon.start({token: 'two\nlines', stateDir: '/download0/daemon-state'}));

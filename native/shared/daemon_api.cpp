@@ -7,7 +7,9 @@
 #include "daemon.hpp"
 #include "app_config.hpp"
 #include "worker_thread.hpp"
+#include <fcntl.h>
 #include <memory>
+#include <unistd.h>
 #include <mutex>
 
 namespace {
@@ -87,12 +89,37 @@ JSValue poll(JSContext* ctx, JSValueConst, int, JSValueConst*) {
 }
 } // namespace
 
+// 32 hex characters from the kernel's random source for daemon.token, or null where it cannot be read
+// (the app then makes one itself).
+static JSValue random_token(JSContext* ctx, JSValueConst, int, JSValueConst*) {
+  unsigned char bytes[16];
+  const int fd = open("/dev/urandom", O_RDONLY);
+  if (fd < 0) return JS_NULL;
+  std::size_t got = 0;
+  while (got < sizeof bytes) {
+    const ssize_t read_now = read(fd, bytes + got, sizeof bytes - got);
+    if (read_now <= 0) break;
+    got += static_cast<std::size_t>(read_now);
+  }
+  close(fd);
+  if (got != sizeof bytes) return JS_NULL;
+  static const char digits[] = "0123456789abcdef";
+  char text[33];
+  for (std::size_t i = 0; i < sizeof bytes; ++i) {
+    text[2 * i] = digits[bytes[i] >> 4];
+    text[2 * i + 1] = digits[bytes[i] & 15];
+  }
+  text[32] = 0;
+  return JS_NewString(ctx, text);
+}
+
 JSValue ps5_react_daemon_api(JSContext* ctx) {
   JSValue api = JS_NewObject(ctx);
   JS_SetPropertyStr(ctx, api, "supported", JS_NewBool(ctx, PS5_REACT_DAEMON));
   JS_SetPropertyStr(ctx, api, "isDaemon", JS_FALSE);
   JS_SetPropertyStr(ctx, api, "args", JS_NULL);
   JS_SetPropertyStr(ctx, api, "port", JS_NewInt32(ctx, daemon_process::port()));
+  JS_SetPropertyStr(ctx, api, "randomToken", JS_NewCFunction(ctx, random_token, "randomToken", 0));
   JS_SetPropertyStr(ctx, api, "start", JS_NewCFunction(ctx, start, "start", 2));
   JS_SetPropertyStr(ctx, api, "cancel", JS_NewCFunction(ctx, cancel, "cancel", 1));
   JS_SetPropertyStr(ctx, api, "poll", JS_NewCFunction(ctx, poll, "poll", 0));

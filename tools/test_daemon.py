@@ -142,6 +142,8 @@ def run(command, build, env, data_dir, file_port):
             reports[name] = json.loads(value) if value.startswith(("{", "\"", "[")) else value
     assert result.returncode == 0 and "failed" not in reports, result.stdout[-4000:] + result.stderr[-2000:]
     assert reports["app"] == {"supported": True, "isDaemon": False, "args": None}, reports
+    tokens = reports["random"]
+    assert all(len(t) == 32 and int(t, 16) >= 0 for t in tokens) and tokens[0] != tokens[1], reports
     assert "only the daemon serves" in reports["serve"], reports
     assert reports["invalid"]["ok"] is False and "token" in reports["invalid"]["error"], reports
     assert reports["start"] == {"ok": True}, reports
@@ -254,6 +256,17 @@ def run(command, build, env, data_dir, file_port):
     assert daemon.wait(10) == 0 and wait_gone(), "SIGTERM stops it cleanly"
     assert "stopping on signal 15" in (data_dir / "daemon.log").read_text()
     print("PASS: log rotation, busy (exit 3) when the port is taken, bad request (exit 2), SIGTERM.")
+
+    # A long run's log rotates at its size limit instead of going silent.
+    daemon, line = spawn(build, {**env, "PS5_REACT_DAEMON_LOG_BYTES": "4096"}, request_text)
+    assert line == "ready", line
+    for _ in range(40):
+        request("GET", "/echo?" + "x" * 200)
+    request("POST", "/exit")
+    assert daemon.wait(10) == 0 and wait_gone()
+    current, previous = (data_dir / "daemon.log").read_text(), (data_dir / "daemon.prev.log").read_text()
+    assert len(current) <= 4096 and len(previous) <= 4096 and "exit 0" in current, (len(current), len(previous))
+    print("PASS: the log rotates at its size limit and keeps the latest lines.")
 
 
 if __name__ == "__main__":

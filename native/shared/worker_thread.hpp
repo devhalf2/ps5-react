@@ -26,6 +26,13 @@ public:
     body_ = nullptr;
   }
 
+  // Lets the thread run on alone: for a body stuck in a call that does not return (a shutdown must not wait
+  // on it). The thread still runs this object's body, so the object must outlive it (never reuse it).
+  void detach() {
+    if (started_) pthread_detach(thread_);
+    started_ = false;
+  }
+
 private:
   static void* entry(void* self) {
     static_cast<WorkerThread*>(self)->body_();

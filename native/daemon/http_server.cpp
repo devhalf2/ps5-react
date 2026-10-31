@@ -360,6 +360,13 @@ void Server::write(Connection& connection) {
 void Server::close(int timeout_ms) {
   if (listener_ >= 0) ::close(listener_);
   listener_ = -1;
+  flush(timeout_ms);
+  for (auto& connection : connections_)
+    if (!connection->closed) ::close(connection->fd);
+  connections_.clear();
+}
+
+void Server::flush(int timeout_ms) {
   for (const std::int64_t deadline = now_ms() + timeout_ms; now_ms() < deadline;) {
     std::vector<pollfd> fds;
     for (const auto& connection : connections_)
@@ -369,8 +376,5 @@ void Server::close(int timeout_ms) {
     for (auto& connection : connections_)
       if (!connection->closed && connection->sent < connection->output.size()) write(*connection);
   }
-  for (auto& connection : connections_)
-    if (!connection->closed) ::close(connection->fd);
-  connections_.clear();
 }
 } // namespace http

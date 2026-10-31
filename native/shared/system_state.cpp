@@ -33,11 +33,19 @@ std::int64_t clock_us(clockid_t clock) {
   return static_cast<std::int64_t>(now.tv_sec) * 1000000 + now.tv_nsec / 1000;
 }
 
+// A stop waits this long for the watcher, which may be inside a Sony call that does not return.
+constexpr auto kStopWait = std::chrono::seconds(3);
+
 std::mutex mutex;
 std::condition_variable wake;
+std::condition_variable exited;
 bool stopping = false;
 bool running = false;
-WorkerThread worker;
+bool watching = false;
+// Each start's watcher runs while the generation is its own, so one abandoned by stop() never resumes.
+unsigned generation = 0;
+// One per start: a watcher stop() leaves behind keeps its own (leaked, a few bytes) while it finishes.
+WorkerThread* worker = nullptr;
 std::deque<system_state::Event> queue;
 std::string game;
 
@@ -81,14 +89,14 @@ void set_game_locked(const std::string& title, const char* source) {
   if (!game.empty()) push("game-started", source, game);
 }
 
-void watch() {
+void watch(unsigned mine) {
   name_thread("system-state");
   system_platform::open();
   std::int64_t previous_mono = clock_us(CLOCK_MONOTONIC), previous_wall = clock_us(CLOCK_REALTIME);
   std::int64_t next_game = 0, next_power = 0;
   bool was_keeping = false;
   std::unique_lock lock(mutex);
-  while (!stopping) {
+  while (!stopping && generation == mine) {
     lock.unlock();
     system_platform::poll(report);
     const std::int64_t mono = clock_us(CLOCK_MONOTONIC), wall = clock_us(CLOCK_REALTIME);
@@ -109,10 +117,13 @@ void watch() {
     if (continued.exchange(false)) report_locked(false, "sigcont");
     if (gap > kGapUs) report_locked(false, "gap", static_cast<double>((gap - kPassUs) / 1000));
     if (found >= 0) set_game_locked(found ? title : "", "game-poll");
-    wake.wait_for(lock, std::chrono::microseconds(kPassUs), [] { return stopping; });
+    wake.wait_for(lock, std::chrono::microseconds(kPassUs), [mine] { return stopping || generation != mine; });
   }
   lock.unlock();
   system_platform::close();
+  lock.lock();
+  if (generation == mine) watching = false;
+  exited.notify_all();
 }
 } // namespace
 
@@ -121,6 +132,7 @@ bool start() {
   std::lock_guard lock(mutex);
   if (running) return true;
   stopping = false;
+  const unsigned mine = ++generation;
   // SIGCONT is how a process learns it was resumed from standby (PKG Manager relies on it); the
   // handler only sets a flag. Crash signals stay with crash_log.cpp.
   struct sigaction action {};
@@ -128,22 +140,39 @@ bool start() {
   action.sa_flags = SA_RESTART;
   sigemptyset(&action.sa_mask);
   sigaction(SIGCONT, &action, &previous_sigcont);
-  running = worker.start(watch, 512 * 1024);
-  if (!running) sigaction(SIGCONT, &previous_sigcont, nullptr);
+  watching = true;
+  worker = new WorkerThread;
+  running = worker->start([mine] { watch(mine); }, 512 * 1024);
+  if (!running) {
+    delete worker;
+    worker = nullptr;
+    watching = false;
+    sigaction(SIGCONT, &previous_sigcont, nullptr);
+  }
   return running;
 }
 
 void stop() {
-  {
-    std::lock_guard lock(mutex);
-    if (!running) return;
-    stopping = true;
-  }
+  std::unique_lock lock(mutex);
+  if (!running) return;
+  stopping = true;
   wake.notify_all();
-  worker.join();
+  // Bounded: a watcher stuck in a platform call is left to finish on its own instead of holding the exit.
+  const bool done = exited.wait_for(lock, kStopWait, [] { return !watching; });
+  ++generation;
+  lock.unlock();
+  if (done) {
+    worker->join();
+    delete worker;
+  } else {
+    system_platform::log("system: the state watcher did not stop within 3 s; left to finish on its own");
+    worker->detach();
+  }
+  worker = nullptr;
   sigaction(SIGCONT, &previous_sigcont, nullptr);
-  std::lock_guard lock(mutex);
+  lock.lock();
   running = false;
+  watching = false;
   queue.clear();
 }
 
@@ -163,8 +192,11 @@ std::string running_game() {
   return game;
 }
 
-// The watcher resets the timer on its next pass, within a second.
-void keep_awake(bool enabled) { keeping_awake = enabled; }
+// The watcher resets the timer on its next pass, within a second; it starts here if nothing started it.
+void keep_awake(bool enabled) {
+  keeping_awake = enabled;
+  if (enabled && !start()) system_platform::log("system: the state watcher thread did not start");
+}
 
 bool simulate(const char* state, const char* title_id) {
   std::lock_guard lock(mutex);
@@ -181,7 +213,14 @@ bool simulate(const char* state, const char* title_id) {
 } // namespace system_state
 
 namespace {
+// The watcher starts with the first use from JavaScript (System.onStateChange polls at once, or
+// runningGame), so an app that never asks runs no extra thread and makes none of its Sony calls.
+void ensure_started() {
+  if (!system_state::start()) system_platform::log("system: the state watcher thread did not start");
+}
+
 JSValue system_poll(JSContext* ctx, JSValueConst, int, JSValueConst*) {
+  ensure_started();
   JSValue list = JS_NewArray(ctx);
   std::uint32_t index = 0;
   for (const auto& event : system_state::poll()) {
@@ -197,6 +236,7 @@ JSValue system_poll(JSContext* ctx, JSValueConst, int, JSValueConst*) {
 }
 
 JSValue system_running_game(JSContext* ctx, JSValueConst, int, JSValueConst*) {
+  ensure_started();
   const std::string title = system_state::running_game();
   if (title.empty()) return JS_NULL;
   JSValue object = JS_NewObject(ctx);
@@ -218,7 +258,6 @@ JSValue system_simulate(JSContext* ctx, JSValueConst, int, JSValueConst* argv) {
 } // namespace
 
 JSValue ps5_react_system_api(JSContext* ctx) {
-  if (!system_state::start()) system_platform::log("system: the state watcher thread did not start");
   JSValue api = JS_NewObject(ctx);
   JS_SetPropertyStr(ctx, api, "poll", JS_NewCFunction(ctx, system_poll, "poll", 0));
   JS_SetPropertyStr(ctx, api, "runningGame", JS_NewCFunction(ctx, system_running_game, "runningGame", 0));

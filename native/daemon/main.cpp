@@ -22,6 +22,7 @@
 #include <climits>
 #include <csignal>
 #include <cstdarg>
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>
 #include <ctime>
@@ -39,15 +40,28 @@ extern const unsigned long pandorad_bundle_length;
 namespace {
 // The daemon shares the console with a game: its script gets the heap the spec budgets (docs/NATIVE-API.md).
 constexpr std::size_t kHeapBytes = 32 * 1024 * 1024;
-constexpr std::size_t kThreadStack = 2 * 1024 * 1024, kScriptStack = 1024 * 1024;
-// A daemon that logs in a loop stops logging here rather than filling the drive.
-constexpr std::uint64_t kMaxLogBytes = 16 * 1024 * 1024;
+// Every thread gets an explicit stack of at most 1 MiB (spec 5.6); QuickJS stops a script short of it.
+constexpr std::size_t kThreadStack = 1024 * 1024, kScriptStack = 768 * 1024;
+// daemon.log is rotated to daemon.prev.log at this size, so a long-running daemon keeps its latest lines and
+// the two files never take more than twice this. PS5_REACT_DAEMON_LOG_BYTES lowers it in desktop tests.
+constexpr std::uint64_t kMaxLogBytes = 8 * 1024 * 1024;
+std::uint64_t max_log_bytes() {
+#ifndef PROSPERO
+  if (const char* value = std::getenv("PS5_REACT_DAEMON_LOG_BYTES")) {
+    const long long bytes = std::atoll(value);
+    if (bytes >= 1024) return static_cast<std::uint64_t>(bytes);
+  }
+#endif
+  return kMaxLogBytes;
+}
+std::string log_path, previous_log_path;
 
 struct Args { std::string token, state_dir, version; } args;
 // The app's end (payload loader socket or pipe) until the one answer line is written.
 int channel = -1;
 std::mutex log_mutex;
 std::uint64_t logged = 0;
+bool rotate_log();
 volatile std::sig_atomic_t stop_signal = 0;
 bool exiting = false;
 int exit_code = 0;
@@ -64,9 +78,8 @@ void log_line(const char* text) {
   std::snprintf(stamp + length, sizeof stamp - length, ".%03ldZ ", now.tv_nsec / 1'000'000);
   std::string line = std::string(stamp) + text + "\n";
   std::lock_guard lock(log_mutex);
-  if (logged > kMaxLogBytes) return;
+  if (logged + line.size() > max_log_bytes() && rotate_log()) logged = 0;
   logged += line.size();
-  if (logged > kMaxLogBytes) line = std::string(stamp) + "log limit reached; later lines are dropped\n";
   // stdout is daemon.log once it is open, which native printf output shares.
   std::fflush(stdout);
   (void)!::write(STDOUT_FILENO, line.data(), line.size());
@@ -140,18 +153,27 @@ bool open_log(std::string& error) {
     error = std::string("cannot create the data folder: ") + std::strerror(errno);
     return false;
   }
-  const std::string current = std::string(directory) + "/daemon.log", previous = std::string(directory) + "/daemon.prev.log";
-  std::rename(current.c_str(), previous.c_str());
-  const int fd = open(current.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_APPEND, 0644);
-  if (fd < 0) {
-    error = current + ": " + std::strerror(errno);
+  log_path = std::string(directory) + "/daemon.log";
+  previous_log_path = std::string(directory) + "/daemon.prev.log";
+  if (!rotate_log()) {
+    error = log_path + ": " + std::strerror(errno);
     return false;
   }
+  setvbuf(stdout, nullptr, _IOLBF, 0);
+  return true;
+}
+
+// daemon.log becomes daemon.prev.log and a new daemon.log takes stdout and stderr (native printf output
+// too). Under log_mutex once the log is open; false leaves the current file in place.
+bool rotate_log() {
+  if (log_path.empty()) return false;
+  std::rename(log_path.c_str(), previous_log_path.c_str());
+  const int fd = open(log_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_APPEND, 0644);
+  if (fd < 0) return false;
   std::fflush(stdout);
   dup2(fd, STDOUT_FILENO);
   dup2(fd, STDERR_FILENO);
   if (fd > STDERR_FILENO) ::close(fd);
-  setvbuf(stdout, nullptr, _IOLBF, 0);
   return true;
 }
 
@@ -307,8 +329,6 @@ void install_api(JSContext* ctx) {
 int run() {
   name_thread("pandorad");
   if (!network::start()) log_line("network: the transport did not start; Downloads and Http will fail");
-  // Rest mode, resume and a running game (System.onStateChange); installing the API also starts it.
-  if (!system_state::start()) log_line("system: the state watcher thread did not start");
   if (!js::start(kHeapBytes, kScriptStack, log_line)) {
     answer("error the script runtime did not start");
     return 1;
@@ -334,13 +354,16 @@ int run() {
     js::drain();
     daemon_platform::tick();
   }
-  // Answers already given still go out; then each service stops and saves what it can resume from.
-  server.close(2000);
+  // Answers already given still go out; then each service stops and saves what it can resume from. The
+  // port is let go only after that: a closed port tells the app no transfer of this daemon still writes,
+  // so the next daemon (which needs the port) or the app never overlaps with it.
+  server.flush(2000);
   archives::stop();
   packages::stop();
   removals::stop();
   network::stop();
   system_state::stop();
+  server.close(0);
   JS_FreeValue(js::context(), serve_callback);
   serve_callback = JS_UNDEFINED;
   js::stop();

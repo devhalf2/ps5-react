@@ -53,6 +53,8 @@ public:
   void run(int timeout_ms);
   // Answers the request with this ticket; ignored when its client has gone or it was answered.
   void respond(std::uint64_t ticket, Response response);
+  // Writes what is answered for up to timeout_ms, still bound to the port (new clients wait in the backlog).
+  void flush(int timeout_ms);
   // Stops accepting and writes what is answered for up to timeout_ms, then closes every socket.
   void close(int timeout_ms);
 

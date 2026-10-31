@@ -17,6 +17,7 @@ const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 Daemon.serve(async ({method, path, query, headers, body}) => {
   if (path === '/hello') return json(200, {protocol: 1, version, startedAt});
   if (path === '/echo') {
+    console.log(`echo ${JSON.stringify(query)}`);
     return json(200, {method, path, query, headers, body, isDaemon: Daemon.isDaemon, supported: Daemon.supported,
       platform: Platform.OS, args: Daemon.args, pid: Daemon.pid, port: Daemon.port, timers, modules: Object.keys(globalThis.__ps5ReactNative).sort()});
   }

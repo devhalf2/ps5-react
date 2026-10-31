@@ -356,6 +356,9 @@ test('Daemon.start resolves ok or the reason, never rejects, and reads the host 
     start: (token, stateDir) => { starts.push([token, stateDir]); return starts.length; }, poll: () => snapshots, cancel() {}}};
   try {
     assert.deepEqual([Daemon.supported, Daemon.isDaemon, Daemon.args, Daemon.pid, Daemon.port], [true, false, null, null, 9061]);
+    assert.equal(Daemon.randomToken(), null, 'a host without a random source gives null');
+    globalThis.__ps5ReactNative.daemon.randomToken = () => 'ab'.repeat(16);
+    assert.equal(Daemon.randomToken(), 'ab'.repeat(16));
     const ready = Daemon.start({token: 'a'.repeat(32), stateDir: '/data/queue'});
     await Promise.resolve();
     snapshots = [{id: 1, state: 'completed', error: ''}];

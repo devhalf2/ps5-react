@@ -25,9 +25,11 @@ struct Event {
   double paused_ms = -1; // resumed after a gap: how long the process did not run
 };
 
-// Starts the watcher thread; repeated calls do nothing. False when the thread cannot start.
+// Starts the watcher thread; repeated calls do nothing. False when the thread cannot start. Hosts need not
+// call it: the first System poll or runningGame from JavaScript, or keep_awake(true), starts it.
 bool start();
-// Stops and joins the watcher; start() may run it again.
+// Stops the watcher; waits at most 3 s for it, then leaves a watcher stuck in a platform call to finish
+// on its own. start() may run it again.
 void stop();
 // Events since the last poll, oldest first; at most kMaxQueued are kept.
 std::vector<Event> poll();
