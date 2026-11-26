@@ -25,6 +25,17 @@ int main(void) {
   assert(browser_capture_url("", url));
   assert(browser_capture_url("Game DLC.pkg", "https://vik1ngfile.site/d/Ab01234567/Game%20DLC.pkg"));
   assert(!browser_capture_url("Game DLC.pkg", "https://vik1ngfile.site.evil.test/d/Ab01234567/Game%20DLC.pkg"));
+  assert(browser_capture_url("Game DLC.pkg", "https://vik1ngf1le.online/d/Ab01234567/Game%20DLC.pkg"));
+  assert(!browser_capture_url("Game DLC.pkg", "https://vik1ngf1le.online.evil.test/d/Ab01234567/Game%20DLC.pkg"));
+  {
+    /* The scanner tries every prefix: a mirror link in UTF-16 browser memory is found too. */
+    const char *mirror = "https://vik1ngf1le.online/d/Ab01234567/Game%20DLC.pkg";
+    unsigned char wide[256] = {0};
+    for (size_t i = 0; i < strlen(mirror); i++) wide[1 + i * 2] = (unsigned char)mirror[i];
+    BrowserMatch found = {.filename = "Game DLC.pkg"};
+    assert(browser_match(&found, wide, 1 + strlen(mirror) * 2 + 2));
+    assert(!strcmp(found.url, mirror));
+  }
   assert(!browser_capture_url("", "https://vikingfile.com/d/Ab01234567/"));
   assert(!browser_capture_url("", "https://vikingfile.com/d/Ab01234567/a%2Fb.rar"));
   assert(!browser_capture_url("", "https://vikingfile.com/d/Ab01234567/a%5Cb.rar"));

@@ -5,7 +5,8 @@
 #include <stdbool.h>
 #include <stddef.h>
 typedef struct { const char *filename; char url[544]; } BrowserMatch;
-extern const char *const browser_capture_prefixes[2];
+#define BROWSER_CAPTURE_PREFIXES 3
+extern const char *const browser_capture_prefixes[BROWSER_CAPTURE_PREFIXES];
 const char *browser_capture_prefix(const char *url);
 bool browser_capture_url(const char *filename, const char *url);
 bool browser_match(void *context, const unsigned char *bytes, size_t length);
