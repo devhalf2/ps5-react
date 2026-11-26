@@ -9,10 +9,12 @@ static int hex(unsigned char c) {
   if (c >= 'A' && c <= 'F') return c - 'A' + 10;
   return -1;
 }
-// Vikingfile moved its pages to vik1ngfile.site; its download links may follow.
-const char *const browser_capture_prefixes[] = {"https://vikingfile.com/d/", "https://vik1ngfile.site/d/"};
+// Vikingfile moved its pages to vik1ngfile.site, then to vik1ngf1le.online (vikingfile.com/f/<id>
+// redirects there, 2026-11-26); its download links may follow. Pandora's viking-capture.js lists the same.
+const char *const browser_capture_prefixes[BROWSER_CAPTURE_PREFIXES] = {"https://vikingfile.com/d/",
+  "https://vik1ngfile.site/d/", "https://vik1ngf1le.online/d/"};
 const char *browser_capture_prefix(const char *url) {
-  for (size_t i = 0; i < sizeof browser_capture_prefixes / sizeof *browser_capture_prefixes; i++)
+  for (size_t i = 0; i < BROWSER_CAPTURE_PREFIXES; i++)
     if (!strncmp(url, browser_capture_prefixes[i], strlen(browser_capture_prefixes[i]))) return browser_capture_prefixes[i];
   return NULL;
 }

@@ -11,7 +11,7 @@ static bool boundary(unsigned char c) {
 }
 bool browser_match(void *context, const unsigned char *bytes, size_t length) {
     BrowserMatch *match = context;
-    for (size_t which = 0; which < 2; which++) {
+    for (size_t which = 0; which < BROWSER_CAPTURE_PREFIXES; which++) {
     const char *prefix = browser_capture_prefixes[which];
     const size_t plen = strlen(prefix);
     for (size_t step = 1; step <= 2; step++) {
